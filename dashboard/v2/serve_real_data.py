@@ -97,7 +97,7 @@ def build_real_dashboard_data(target_date=None):
     }
 
     # 1. Latest alert (fires list, data_sources, generated_at)
-    if ALERT_LATEST.exists():
+    if date_str == TODAY and ALERT_LATEST.exists():
         try:
             alert = json.loads(ALERT_LATEST.read_text(encoding="utf-8"))
             data["alert"]             = alert
@@ -118,7 +118,7 @@ def build_real_dashboard_data(target_date=None):
     bulletin_severity  = "UNKNOWN"
     division_fwi       = {}
 
-    if FUSED_LATEST.exists():
+    if date_str == TODAY and FUSED_LATEST.exists():
         try:
             fused = json.loads(FUSED_LATEST.read_text(encoding="utf-8"))
 
@@ -160,6 +160,41 @@ def build_real_dashboard_data(target_date=None):
                 })
         except Exception as exc:
             print(f"[WARN] Could not load fused data: {exc}")
+    else:
+        # Load SOPs directly for the requested date to simulate the fused structure
+        sops = _load_sops(date_str)
+        for i, sop in enumerate(sops):
+            beats.append({
+                "beat_id":          sop.get("beat_id"),
+                "fused_tier":       sop.get("tier") or "CLEAR",
+                "fused_tier_rank":  i,
+                "centroid_lat":     sop.get("centroid_lat"),
+                "centroid_lon":     sop.get("centroid_lon"),
+                "risk_score":       sop.get("risk_score"),
+                "p_ignition":       sop.get("p_ignition"),
+                "muhurta_stage":    sop.get("muhurta_stage"),
+                "peak_frp":         0,
+                "fire_count":       0,
+                "lat":              sop.get("centroid_lat"),
+                "lon":              sop.get("centroid_lon"),
+                "sources": {
+                    "jwalaNetra": {
+                        "tier":          sop.get("tier"),
+                        "risk_score":    sop.get("risk_score"),
+                        "p_ignition":    sop.get("p_ignition"),
+                        "muhurta_stage": sop.get("muhurta_stage"),
+                    },
+                    "firms_nrt": {
+                        "fire_count":    0,
+                        "peak_frp_mw":   0,
+                        "fires":         [],
+                    },
+                    "vanaagni_severity": None,
+                },
+            })
+        beats.sort(key=lambda x: (x["fused_tier"] != "CLEAR", x["risk_score"] or 0, x["p_ignition"] or 0), reverse=True)
+        for i, b in enumerate(beats):
+            b["fused_tier_rank"] = i
 
     data["beats"]             = beats
     data["total_beats"]       = len(beats)
@@ -203,6 +238,8 @@ def _load_sops(date_str):
                 "spread_tier":     sop.get("spread_tier"),
                 "spread_area_ha":  sop.get("spread_area_ha"),
                 "shap_reasons":    sop.get("shap_reasons", []),
+                "centroid_lat":    sop.get("centroid_lat"),
+                "centroid_lon":    sop.get("centroid_lon"),
             })
         except Exception as exc:
             print(f"[WARN] SOP load failed for {sf.name}: {exc}")

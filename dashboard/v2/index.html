@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>JwalaNetra Command Horizon v2</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🔥</text></svg>">
 
 <!-- MapLibre GL JS -->
 <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
@@ -499,7 +500,7 @@ async function fetchRealData() {
   try {
     const resp = await fetch(CONFIG.realDataUrl);
     state.realData = await resp.json();
-    console.log('[REAL DATA] Loaded:', state.realData.total_beats, 'beats,', state.realData.sop_count, 'SOPs, source:', state.realData.source);
+    console.log('[REAL DATA] Loaded:', state.realData.total_beats, 'beats, source:', state.realData.source);
   } catch (e) {
     console.warn('Real data API not available, using fallback:', e.message);
     state.realData = null;
@@ -530,8 +531,9 @@ function applyIgnitionToFeatures() {
   state.geojsonData.features.forEach((f, i) => {
     const beatData = findBeatRisk(f.properties);
     const sop = findBeatSop(f.properties);
-    const tier = (sop && sop.tier) || (beatData && beatData.fused_tier) || 'CLEAR';
-    const p_ign = (sop && sop.p_ignition != null) ? sop.p_ignition : (beatData ? (beatData.p_ignition || 0) : 0);
+    // Fused tier is authoritative (post-fusion); SOP tier is raw pre-fusion (often stale)
+    const tier = (beatData && beatData.fused_tier) || (sop && sop.tier) || 'CLEAR';
+    const p_ign = (beatData && beatData.p_ignition != null) ? beatData.p_ignition : (sop ? (sop.p_ignition || 0) : 0);
     state.map.setFeatureState({ source: 'compartments', id: i }, { tier: tier, p_ign: p_ign });
   });
 }
@@ -616,11 +618,11 @@ function addHotspotLayer() {
 }
 
 function buildHeatmapWeight(props) {
-  // Use p_ignition directly from the SOP (preferred) or fused beat data.
-  const sop = findBeatSop(props);
-  if (sop && sop.p_ignition != null) return Math.min(1, sop.p_ignition);
+  // Fused beat data is authoritative (post-fusion with varied risk); SOP is raw (often uniform 0.01)
   const beatData = findBeatRisk(props);
-  return beatData ? Math.min(1, beatData.p_ignition || 0.01) : 0.01;
+  if (beatData && beatData.p_ignition != null) return Math.min(1, beatData.p_ignition);
+  const sop = findBeatSop(props);
+  return sop ? Math.min(1, sop.p_ignition || 0.01) : 0.01;
 }
 
 function addHeatmapLayer() {
@@ -707,11 +709,16 @@ function showDetailPanel(feature) {
     if (full) areaHa = (turf.area(full) / 10000).toFixed(1);
   } catch (e) {}
 
-  // Look up real SOP data for this compartment
+  // Look up BOTH fused beat data (tier/risk/p_ignition) and SOP data (muhurta physics)
+  // Fused data is the authoritative source for risk assessment (may differ from SOP if pipeline re-ran)
   const sop = findBeatSop(p);
-  const riskScore = sop ? (sop.p_ignition != null ? sop.p_ignition.toFixed(3) : 'N/A') : 'N/A';
-  const riskClass = sop ? (sop.tier || 'CLEAR') : 'CLEAR';
-  const riskColor = riskClass === 'CRITICAL' ? 'var(--accent-danger)' : riskClass === 'HIGH' ? 'var(--accent-fire)' : riskClass === 'MODERATE' || riskClass === 'WATCH' ? 'var(--accent-warn)' : 'var(--accent-safe)';
+  const fused = findBeatRisk(p);
+  // Prefer fused data for tier/risk/p_ignition (it's the latest pipeline fusion); fall back to SOP
+  const pIgn = fused ? (fused.p_ignition || (sop ? sop.p_ignition : null)) : (sop ? sop.p_ignition : null);
+  const riskScore = pIgn != null ? pIgn.toFixed(3) : 'N/A';
+  const fusedTier = fused ? (fused.fused_tier || 'CLEAR') : (sop ? (sop.tier || 'CLEAR') : 'CLEAR');
+  const fusedRisk = fused ? (fused.risk_score || (sop ? sop.risk_score : null)) : (sop ? sop.risk_score : null);
+  const riskColor = fusedTier === 'CRITICAL' || fusedTier === 'OPERATIONAL' ? 'var(--accent-danger)' : fusedTier === 'WATCH' ? 'var(--accent-fire)' : fusedTier === 'ADVISORY' ? 'var(--accent-warn)' : 'var(--accent-safe)';
 
   content.replaceChildren();
 
@@ -724,9 +731,9 @@ function showDetailPanel(feature) {
   const spreadColor = spreadTier === 'EXTREME' ? 'var(--accent-danger)' : spreadTier === 'HIGH' ? 'var(--accent-fire)' : spreadTier === 'MODERATE' ? 'var(--accent-warn)' : 'var(--accent-safe)';
   const items = [
     { label: 'Area', value: areaHa + ' ha' },
-    { label: 'P(Ignition)', value: riskScore, color: sop ? riskColor : undefined },
-    { label: 'Tier', value: riskClass, color: riskColor },
-    { label: 'Risk Score (1-5)', value: sop && sop.risk_score != null ? String(sop.risk_score) : 'N/A' },
+    { label: 'P(Ignition)', value: riskScore, color: riskColor },
+    { label: 'Fused Tier', value: fusedTier, color: riskColor },
+    { label: 'Risk Score', value: fusedRisk != null ? String(fusedRisk) : 'N/A' },
     { label: 'EMA Score', value: sop && sop.ema_score != null ? sop.ema_score.toFixed(3) : 'N/A' },
     { label: 'Confidence', value: sop && sop.confidence != null ? sop.confidence.toFixed(3) : 'N/A' },
     { label: 'Muhurta Stage', value: sop ? (sop.muhurta_stage || 'N/A') : 'N/A' },
@@ -904,8 +911,8 @@ function computeHaAtRisk() {
   let totalHa = 0;
   state.geojsonData.features.forEach(f => {
     const beatData = findBeatRisk(f.properties);
-    const sop = findBeatSop(f.properties);
-    const tier = (sop && sop.tier) || (beatData && beatData.fused_tier) || 'CLEAR';
+    // Fused tier is authoritative (SOP tiers are pre-fusion and often stale)
+    const tier = (beatData && beatData.fused_tier) || 'CLEAR';
     if (tier !== 'CLEAR') {
       try { totalHa += turf.area(f) / 10000; } catch (e) {}
     }
@@ -960,7 +967,16 @@ function generateAlertFeed() {
 // ─── Real FWI from pipeline ───
 function applyRealFWI() {
   const fwi = state.realData ? (state.realData.division_fwi || state.realData.fwi) : null;
-  if (!fwi || !fwi.ffmc) return;
+  if (!fwi || !fwi.ffmc) {
+    setText('fwiFFMC', '--');
+    setText('fwiDMC', '--');
+    setText('fwiDC', '--');
+    setText('fwiISI', '--');
+    setText('fwiBUI', '--');
+    setText('fwiFWI', '--');
+    document.getElementById('fwiFill').style.width = '0%';
+    return;
+  }
   setText('fwiFFMC', fwi.ffmc.toFixed(1));
   setText('fwiDMC', fwi.dmc.toFixed(1));
   setText('fwiDC', fwi.dc.toFixed(1));
@@ -973,23 +989,28 @@ function applyRealFWI() {
 
 function applyRealThreatLevel() {
   const rd = state.realData;
-  if (!rd) return;
-  const sev = rd.bulletin_severity || 'CLEAR';
+  const sev = (rd && rd.bulletin_severity) ? rd.bulletin_severity : 'UNKNOWN';
   const tEl = document.getElementById('threatLevel');
-  const map = { 'CRITICAL': 'critical', 'HIGH': 'high', 'MODERATE': 'moderate', 'LOW': 'low', 'CLEAR': 'low' };
+  const map = { 'CRITICAL': 'critical', 'HIGH': 'high', 'MODERATE': 'moderate', 'LOW': 'low', 'CLEAR': 'low', 'UNKNOWN': 'low' };
   tEl.textContent = sev;
   tEl.className = 'threat-level ' + (map[sev] || 'low');
 }
 
 function applySatPassInfo() {
   const rd = state.realData;
-  if (!rd || !rd.sat_pass) return;
+  const satEl = document.getElementById('statSatPass');
+  if (!rd || !rd.sat_pass) {
+    setText('statSatPass', '--');
+    satEl.title = '';
+    return;
+  }
   const sp = rd.sat_pass;
   setText('statSatPass', sp.last_pass || '--');
   // Tooltip with data sources
-  const satEl = document.getElementById('statSatPass');
   if (sp.sources && sp.sources.length) {
     satEl.title = 'Sources: ' + sp.sources.join(', ');
+  } else {
+    satEl.title = '';
   }
 }
 
