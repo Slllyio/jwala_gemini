@@ -12,9 +12,6 @@
 <!-- deck.gl standalone -->
 <script src="https://unpkg.com/deck.gl@9.0.16/dist.min.js"></script>
 
-<!-- Chart.js for panels -->
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-
 <!-- Turf.js for spatial ops -->
 <script src="https://unpkg.com/@turf/turf@7.1.0/turf.min.js"></script>
 
@@ -246,8 +243,6 @@ body {
 .detail-item-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
 .detail-item-value { font-family: var(--font-mono); font-size: 15px; font-weight: 600; margin-top: 2px; }
 
-.phenology-container { margin-top: 12px; background: rgba(255,255,255,0.03); border-radius: 8px; padding: 10px; }
-.phenology-canvas { width: 100%; height: 80px; }
 
 .search-bar { position: fixed; top: 80px; left: 50%; transform: translateX(-50%); z-index: 95; width: 360px; display: none; }
 .search-bar.visible { display: block; }
@@ -432,24 +427,11 @@ const CONFIG = {
 
 const state = {
   map: null, geojsonData: null, selectedFeature: null, activeRange: null,
-  layers: { compartments: true, heatmap: true, hotspots: true, vuln_gradient: true },
+  layers: { compartments: true, heatmap: true, hotspots: true, labels: true },
   weatherData: null, alertsData: [], is3D: false, timelineDates: [],
   realData: null,     // from /api/real-data
   beatSops: null,     // from /api/beat-sops (indexed by beat_id)
   beatRiskMap: {},    // beat_id -> {risk_score, p_ignition, tier, ...}
-  fsiData: null,      // from /api/fsi-compartments [{name, cells, mean_fsi, max_fsi, center_lat, center_lon}]
-};
-
-// Mapping from GeoJSON RANGE (uppercase) to phenology model key prefix
-const RANGE_TO_PHENO_KEY = {
-  'ARON': 'Aron',
-  'BAMORI': 'Bamori',
-  'BINAGANJ': 'Binaganj',
-  'FATEHGARH': 'Fatehgarh',
-  'GUNA NORTH': 'North_Guna',
-  'GUNA SOUTH': 'South_Guna',
-  'M GARH': 'Maksudangarh',
-  'RAGHOGARH': 'Raghogarh'
 };
 
 // ─── Safe DOM helpers ───
@@ -487,10 +469,10 @@ async function init() {
   state.map.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-left');
 
   state.map.on('load', async () => {
-    await Promise.all([loadGeoJSON(), fetchWeather(), fetchRealData(), fetchBeatSops(), fetchFsiData()]);
+    await Promise.all([loadGeoJSON(), fetchWeather(), fetchRealData(), fetchBeatSops()]);
     buildBeatRiskMap();
     setupMapLayers();
-    applyVulnerabilityToFeatures();
+    applyIgnitionToFeatures();
     setupRangeFilters();
     setupLayerToggles();
     setupMapControls();
@@ -535,30 +517,6 @@ async function fetchBeatSops() {
   }
 }
 
-async function fetchFsiData() {
-  try {
-    const resp = await fetch('/api/fsi-compartments');
-    const data = await resp.json();
-    const arr = data.compartments || data;
-    // Index by compartment name for O(1) lookup
-    state.fsiData = {};
-    (Array.isArray(arr) ? arr : []).forEach(c => { state.fsiData[c.name] = c; });
-    console.log('[FSI] Loaded:', Object.keys(state.fsiData).length, 'compartments');
-  } catch (e) {
-    console.warn('FSI API not available:', e.message);
-    state.fsiData = {};
-  }
-}
-
-// Lookup FSI record by compartment number (GeoJSON NEW_No_ like "P 296" or bare "296")
-function findFsiRecord(props) {
-  if (!state.fsiData) return null;
-  const no = String(props.NEW_No_ || '');
-  const key1 = 'P ' + no;
-  const key2 = no;
-  return state.fsiData[key1] || state.fsiData[key2] || null;
-}
-
 function buildBeatRiskMap() {
   if (!state.realData || !state.realData.beats) return;
   state.realData.beats.forEach(b => {
@@ -566,13 +524,15 @@ function buildBeatRiskMap() {
   });
 }
 
-function applyVulnerabilityToFeatures() {
-  if (!state.geojsonData || !state.realData) return;
+// Apply p_ignition-based tier as feature state for compartment coloring
+function applyIgnitionToFeatures() {
+  if (!state.geojsonData) return;
   state.geojsonData.features.forEach((f, i) => {
     const beatData = findBeatRisk(f.properties);
-    if (beatData && beatData.vulnerability != null) {
-      state.map.setFeatureState({ source: 'compartments', id: i }, { vuln: beatData.vulnerability });
-    }
+    const sop = findBeatSop(f.properties);
+    const tier = (sop && sop.tier) || (beatData && beatData.fused_tier) || 'CLEAR';
+    const p_ign = (sop && sop.p_ignition != null) ? sop.p_ignition : (beatData ? (beatData.p_ignition || 0) : 0);
+    state.map.setFeatureState({ source: 'compartments', id: i }, { tier: tier, p_ign: p_ign });
   });
 }
 
@@ -583,25 +543,23 @@ function setupMapLayers() {
 
   map.addSource('compartments', { type: 'geojson', data: state.geojsonData });
 
-  // Color by vulnerability if available (feature-state), fallback to range color
+  // Color compartments by fused tier from pipeline (p_ignition-based)
   map.addLayer({
     id: 'compartments-fill', type: 'fill', source: 'compartments',
     paint: {
       'fill-color': ['case',
-        ['>', ['coalesce', ['feature-state', 'vuln'], 0], 0],
-        ['interpolate', ['linear'], ['feature-state', 'vuln'],
-          0, 'rgba(34,197,94,0.6)',
-          0.2, 'rgba(234,179,8,0.6)',
-          0.5, 'rgba(249,115,22,0.7)',
-          0.8, 'rgba(239,68,68,0.8)',
-          1.0, 'rgba(127,29,29,0.9)'],
+        ['==', ['feature-state', 'tier'], 'OPERATIONAL'], 'rgba(139,0,0,0.75)',
+        ['==', ['feature-state', 'tier'], 'CRITICAL'],    'rgba(239,68,68,0.75)',
+        ['==', ['feature-state', 'tier'], 'WARNING'],     'rgba(239,68,68,0.65)',
+        ['==', ['feature-state', 'tier'], 'WATCH'],       'rgba(249,115,22,0.65)',
+        ['==', ['feature-state', 'tier'], 'ADVISORY'],    'rgba(234,179,8,0.55)',
+        ['==', ['feature-state', 'tier'], 'CLEAR'],       'rgba(34,197,94,0.18)',
         buildRangeColorExpr()
       ],
       'fill-opacity': ['case',
-        ['boolean', ['feature-state', 'hover'], false], 0.55,
-        ['boolean', ['feature-state', 'selected'], false], 0.65,
-        ['>', ['coalesce', ['feature-state', 'vuln'], 0], 0], 0.4,
-        0.2]
+        ['boolean', ['feature-state', 'hover'], false], 0.75,
+        ['boolean', ['feature-state', 'selected'], false], 0.85,
+        0.5]
     }
   });
 
@@ -658,19 +616,11 @@ function addHotspotLayer() {
 }
 
 function buildHeatmapWeight(props) {
-  // FSI mean_fsi (satellite-derived fire susceptibility) is primary weight.
-  // Muhurta vulnerability (physics: ROS/slope/wind/haines) is secondary.
-  // Falls back to p_ignition, then a low default.
-  const fsiRec = findFsiRecord(props);
-  if (fsiRec && fsiRec.mean_fsi > 0) {
-    // FSI is 0-1 normalized; blend with vulnerability if available
-    const beatData = findBeatRisk(props);
-    const vuln = beatData ? (beatData.vulnerability || 0) : 0;
-    // 70% FSI weight + 30% physics vulnerability
-    return Math.min(1, fsiRec.mean_fsi * 0.7 + vuln * 0.3);
-  }
+  // Use p_ignition directly from the SOP (preferred) or fused beat data.
+  const sop = findBeatSop(props);
+  if (sop && sop.p_ignition != null) return Math.min(1, sop.p_ignition);
   const beatData = findBeatRisk(props);
-  return beatData ? (beatData.vulnerability || beatData.p_ignition || 0.01) : 0.01;
+  return beatData ? Math.min(1, beatData.p_ignition || 0.01) : 0.01;
 }
 
 function addHeatmapLayer() {
@@ -731,17 +681,15 @@ function setupMapInteraction() {
     const f = e.features[0];
     const coords = f.geometry.coordinates;
     const p = f.properties;
-    const isRealFire = p.source === 'VIIRS NOAA-20';
-    const labelText = isRealFire ? 'VIIRS Detection' : 'Vulnerability Monitor';
-    const labelColor = isRealFire ? (p.confidence > 0.8 ? '#ef4444' : '#f97316') : '#a855f7';
+    const labelColor = p.confidence > 0.8 ? '#ef4444' : '#f97316';
     const popupEl = el('div', { style: { fontFamily: 'Inter,sans-serif', color: '#f1f5f9', padding: '4px' } }, [
-      el('div', { style: { fontWeight: '700', fontSize: '13px', marginBottom: '6px', color: labelColor } }, [labelText]),
+      el('div', { style: { fontWeight: '700', fontSize: '13px', marginBottom: '6px', color: labelColor } }, ['VIIRS Fire Detection']),
       el('div', { style: { fontSize: '11px', color: '#94a3b8', lineHeight: '1.6' } }, [
-        isRealFire ? el('span', {}, [el('b', {}, ['FRP: ']), document.createTextNode(p.frp.toFixed(1) + ' MW'), el('br')]) : null,
-        el('b', {}, [isRealFire ? 'Confidence: ' : 'Vulnerability: ']), document.createTextNode((p.confidence * 100).toFixed(0) + '%'), el('br'),
+        el('span', {}, [el('b', {}, ['FRP: ']), document.createTextNode((p.frp || 0).toFixed(1) + ' MW'), el('br')]),
+        el('b', {}, ['Confidence: ']), document.createTextNode((p.confidence * 100).toFixed(0) + '%'), el('br'),
         el('b', {}, ['Coords: ']), document.createTextNode(coords[1].toFixed(4) + ', ' + coords[0].toFixed(4)), el('br'),
-        el('b', {}, ['Status: ']), document.createTextNode(p.time || 'Recent')
-      ].filter(Boolean))
+        el('b', {}, ['Acquired: ']), document.createTextNode(p.time || 'Recent')
+      ])
     ]);
     new maplibregl.Popup({ maxWidth: '260px' }).setLngLat(coords).setDOMContent(popupEl).addTo(map);
   });
@@ -765,9 +713,6 @@ function showDetailPanel(feature) {
   const riskClass = sop ? (sop.tier || 'CLEAR') : 'CLEAR';
   const riskColor = riskClass === 'CRITICAL' ? 'var(--accent-danger)' : riskClass === 'HIGH' ? 'var(--accent-fire)' : riskClass === 'MODERATE' || riskClass === 'WATCH' ? 'var(--accent-warn)' : 'var(--accent-safe)';
 
-  // FSI record for this compartment
-  const fsiRec = findFsiRecord(p);
-
   content.replaceChildren();
 
   content.appendChild(el('div', { className: 'detail-title' }, ['Compartment C-' + (p.NEW_No_ || 'N/A')]));
@@ -775,23 +720,30 @@ function showDetailPanel(feature) {
 
   const grid = el('div', { className: 'detail-grid' });
   const muhurta = sop ? (sop.muhurta || {}) : {};
+  const spreadTier = sop ? (sop.spread_tier || 'None') : 'N/A';
+  const spreadColor = spreadTier === 'EXTREME' ? 'var(--accent-danger)' : spreadTier === 'HIGH' ? 'var(--accent-fire)' : spreadTier === 'MODERATE' ? 'var(--accent-warn)' : 'var(--accent-safe)';
   const items = [
     { label: 'Area', value: areaHa + ' ha' },
     { label: 'P(Ignition)', value: riskScore, color: sop ? riskColor : undefined },
     { label: 'Tier', value: riskClass, color: riskColor },
-    { label: 'Sub Range', value: p.SUB_RANGE || 'N/A' },
+    { label: 'Risk Score (1-5)', value: sop && sop.risk_score != null ? String(sop.risk_score) : 'N/A' },
     { label: 'EMA Score', value: sop && sop.ema_score != null ? sop.ema_score.toFixed(3) : 'N/A' },
     { label: 'Confidence', value: sop && sop.confidence != null ? sop.confidence.toFixed(3) : 'N/A' },
     { label: 'Muhurta Stage', value: sop ? (sop.muhurta_stage || 'N/A') : 'N/A' },
+    { label: 'Muhurta Safe', value: sop ? (sop.muhurta_safe != null ? (sop.muhurta_safe ? 'Yes' : 'No') : 'N/A') : 'N/A' },
     { label: 'CFL Rank', value: sop ? (sop.cfl_rank || 'no_line') : 'N/A' },
+    { label: 'Spread Tier', value: spreadTier, color: spreadColor },
+    { label: 'Spread Area (ha)', value: sop && sop.spread_area_ha != null ? sop.spread_area_ha.toFixed(1) : 'N/A' },
     { label: 'ROS (m/min)', value: muhurta.ros_m_min != null ? muhurta.ros_m_min.toFixed(2) : 'N/A' },
     { label: 'Wind (km/h)', value: muhurta.wind_speed_kmh != null ? muhurta.wind_speed_kmh.toFixed(1) : 'N/A' },
+    { label: 'Wind Gust (km/h)', value: muhurta.wind_gust_kmh != null ? muhurta.wind_gust_kmh.toFixed(1) : 'N/A' },
+    { label: 'Wind Dir Sigma', value: muhurta.wind_dir_sigma_deg != null ? muhurta.wind_dir_sigma_deg.toFixed(1) + ' deg' : 'N/A' },
     { label: 'Haines Index', value: muhurta.haines_index != null ? String(muhurta.haines_index) : 'N/A' },
-    { label: 'Spread Tier', value: sop ? (sop.spread_tier || 'None') : 'N/A' },
-    { label: 'Vulnerability', value: sop && sop.vulnerability != null ? ((sop.vulnerability) * 100).toFixed(1) + '%' : 'N/A', color: sop && sop.vulnerability > 0.5 ? 'var(--accent-fire)' : sop && sop.vulnerability > 0.2 ? 'var(--accent-warn)' : 'var(--accent-safe)' },
+    { label: 'Flame Length (m)', value: muhurta.flame_length_m != null ? muhurta.flame_length_m.toFixed(1) : 'N/A' },
+    { label: 'Byram Intensity', value: muhurta.byram_intensity_kw_m != null ? muhurta.byram_intensity_kw_m.toFixed(1) + ' kW/m' : 'N/A' },
+    { label: 'Fuel Load (t/ha)', value: muhurta.fuel_load_t_ha != null ? muhurta.fuel_load_t_ha.toFixed(2) : 'N/A' },
     { label: 'Slope %', value: muhurta.slope_pct != null ? muhurta.slope_pct.toFixed(1) + '%' : 'N/A' },
-    { label: 'FSI Score', value: fsiRec ? fsiRec.mean_fsi.toFixed(3) : 'N/A', color: fsiRec && fsiRec.mean_fsi > 0.6 ? 'var(--accent-danger)' : fsiRec && fsiRec.mean_fsi > 0.35 ? 'var(--accent-warn)' : 'var(--accent-safe)' },
-    { label: 'FSI Max', value: fsiRec && fsiRec.max_fsi != null ? fsiRec.max_fsi.toFixed(1) : 'N/A' }
+    { label: 'Valley Accel', value: muhurta.valley_accel != null ? String(muhurta.valley_accel) : 'N/A' }
   ];
 
   items.forEach(item => {
@@ -824,89 +776,7 @@ function showDetailPanel(feature) {
     content.appendChild(shapList);
   }
 
-  // Phenology chart
-  const rangeKey = p.RANGE || '';
-  const phenLabel = el('div', { style: { fontSize: '10px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '6px' } }, ['NDVI Phenology (12-month)']);
-  const canvas = el('canvas', { className: 'phenology-canvas', id: 'phenoChart' });
-  canvas.height = 80;
-  content.appendChild(el('div', { className: 'phenology-container' }, [phenLabel, canvas]));
   panel.classList.add('visible');
-  setTimeout(() => drawPhenologyChart('phenoChart', rangeKey), 100);
-}
-
-function drawPhenologyChart(canvasId, rangeKey) {
-  const ctx = document.getElementById(canvasId);
-  if (!ctx) return;
-  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const currentMonth = new Date().getMonth();
-
-  // Resolve phenology model from real data
-  let model = null;
-  let r2Text = '';
-  if (state.realData && state.realData.phenology_models && rangeKey) {
-    const phenoKey = RANGE_TO_PHENO_KEY[rangeKey];
-    if (phenoKey) {
-      const modelKey = phenoKey + '__ndvi';
-      model = state.realData.phenology_models[modelKey] || null;
-    }
-  }
-
-  if (!model) {
-    // Show "no model" message inside canvas area
-    if (window._phenoChart) { window._phenoChart.destroy(); window._phenoChart = null; }
-    const pCtx = ctx.getContext('2d');
-    pCtx.clearRect(0, 0, ctx.width, ctx.height);
-    pCtx.fillStyle = 'rgba(148,163,184,0.5)';
-    pCtx.font = '11px Inter, sans-serif';
-    pCtx.textAlign = 'center';
-    pCtx.fillText('No phenology model for ' + (rangeKey || 'this range'), ctx.width / 2, ctx.height / 2 + 4);
-    return;
-  }
-
-  r2Text = ' (R2=' + model.r2.toFixed(3) + ')';
-
-  // Compute NDVI from Fourier coefficients: ndvi(t) = a0 + a1*cos(2pi*t/12) + b1*sin(2pi*t/12) + a2*cos(4pi*t/12) + b2*sin(4pi*t/12)
-  const [a0, a1, b1, a2, b2] = model.coeffs;
-  const ndvi = months.map((_, t) => {
-    return a0
-      + a1 * Math.cos(2 * Math.PI * t / 12)
-      + b1 * Math.sin(2 * Math.PI * t / 12)
-      + a2 * Math.cos(4 * Math.PI * t / 12)
-      + b2 * Math.sin(4 * Math.PI * t / 12);
-  });
-
-  // Current observation: real value if available, else apply small seasonal anomaly for fire season
-  const anomaly = ndvi.map((v, i) => {
-    if (i > currentMonth) return null;
-    // Fire season (Feb-May) shows below-normal NDVI
-    const isSeason = i >= 1 && i <= 4;
-    return Math.max(0, v - (isSeason ? 0.07 : 0.02));
-  });
-
-  const phenoTitle = (RANGE_TO_PHENO_KEY[rangeKey] || rangeKey) + ' NDVI Phenology' + r2Text;
-
-  if (window._phenoChart) window._phenoChart.destroy();
-  window._phenoChart = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels: months,
-      datasets: [
-        { label: 'Model NDVI' + r2Text, data: ndvi, borderColor: 'rgba(34,197,94,0.7)', backgroundColor: 'rgba(34,197,94,0.06)', fill: true, tension: 0.4, pointRadius: 0, borderWidth: 1.5 },
-        { label: 'Observed', data: anomaly, borderColor: '#f97316', borderWidth: 2, pointRadius: anomaly.map((v, i) => (v !== null && i === currentMonth) ? 5 : 0), pointBackgroundColor: '#ef4444', tension: 0.4, fill: false, spanGaps: false }
-      ]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false },
-        title: { display: true, text: phenoTitle, color: 'rgba(255,255,255,0.4)', font: { size: 8 }, padding: { bottom: 4 } }
-      },
-      scales: {
-        x: { grid: { display: false }, ticks: { color: 'rgba(255,255,255,0.3)', font: { size: 8 } } },
-        y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: 'rgba(255,255,255,0.3)', font: { size: 8 } }, min: 0, max: 0.8 }
-      }
-    }
-  });
 }
 
 // ─── Range Filters ───
@@ -954,10 +824,17 @@ function setupLayerToggles() {
   container.replaceChildren();
   const layers = [
     { key: 'compartments', name: 'Forest Compartments', color: '#3b82f6' },
-    { key: 'heatmap', name: 'Risk Heatmap', color: '#ef4444' },
+    { key: 'heatmap', name: 'Risk Heatmap (p_ignition)', color: '#ef4444' },
     { key: 'hotspots', name: 'VIIRS Hotspots', color: '#f97316' },
-    { key: 'vuln_gradient', name: 'Vulnerability Gradient', color: '#a855f7' }
+    { key: 'labels', name: 'Compartment Labels', color: '#94a3b8' }
   ];
+
+  const layerMapIds = {
+    compartments: ['compartments-fill', 'compartments-outline'],
+    heatmap: ['risk-heatmap'],
+    hotspots: ['hotspots-glow', 'hotspots-point'],
+    labels: ['compartments-labels']
+  };
 
   layers.forEach(layer => {
     const sw = el('div', { className: 'toggle-switch' + (state.layers[layer.key] ? ' on' : ''), 'data-layer': layer.key });
@@ -971,15 +848,9 @@ function setupLayerToggles() {
     toggle.addEventListener('click', () => {
       state.layers[layer.key] = !state.layers[layer.key];
       sw.classList.toggle('on', state.layers[layer.key]);
-      if (layer.key === 'vuln_gradient') {
-        // Toggle vulnerability coloring on/off
-        if (state.layers[layer.key]) { applyVulnerabilityToFeatures(); } else {
-          if (state.geojsonData) state.geojsonData.features.forEach((f, i) => state.map.setFeatureState({ source: 'compartments', id: i }, { vuln: 0 }));
-        }
-      } else {
-        const lm = { compartments: ['compartments-fill','compartments-outline','compartments-labels'], heatmap: ['risk-heatmap'], hotspots: ['hotspots-glow','hotspots-point'] };
-        (lm[layer.key] || []).forEach(lid => { if (state.map.getLayer(lid)) state.map.setLayoutProperty(lid, 'visibility', state.layers[layer.key] ? 'visible' : 'none'); });
-      }
+      (layerMapIds[layer.key] || []).forEach(lid => {
+        if (state.map.getLayer(lid)) state.map.setLayoutProperty(lid, 'visibility', state.layers[layer.key] ? 'visible' : 'none');
+      });
     });
     container.appendChild(toggle);
   });
@@ -1062,7 +933,7 @@ function generateAlertFeed() {
   list.replaceChildren();
 
   const rd = state.realData;
-  const fires = rd ? rd.fires_detected : 0;
+  const fires = rd ? (rd.total_firms_fires || 0) : 0;
   const alertsToday = computeAlertsToday();
   const haAtRisk = computeHaAtRisk();
   const totalBeats = rd ? rd.total_beats : 0;
@@ -1088,7 +959,7 @@ function generateAlertFeed() {
 
 // ─── Real FWI from pipeline ───
 function applyRealFWI() {
-  const fwi = state.realData ? state.realData.fwi : null;
+  const fwi = state.realData ? (state.realData.division_fwi || state.realData.fwi) : null;
   if (!fwi || !fwi.ffmc) return;
   setText('fwiFFMC', fwi.ffmc.toFixed(1));
   setText('fwiDMC', fwi.dmc.toFixed(1));
@@ -1227,7 +1098,7 @@ function setupTimeline() {
       state.beatSops = await sopResp.json();
       state.beatRiskMap = {};
       buildBeatRiskMap();
-      applyVulnerabilityToFeatures();
+      applyIgnitionToFeatures();
       generateAlertFeed();
       applyRealFWI();
       applyRealThreatLevel();
@@ -1268,21 +1139,13 @@ function hideLoading() { setTimeout(() => document.getElementById('loadingOverla
 
 // ─── Real data helpers ───
 function buildRealHotspots() {
-  // If real fires exist from FIRMS, use those
+  // Only show real VIIRS/FIRMS fire detections from the pipeline.
+  // If no FIRMS fires exist, show nothing - do NOT fabricate markers from vulnerability.
   if (state.realData && state.realData.fires && state.realData.fires.length > 0) {
     return state.realData.fires.map(f => ({
       type: 'Feature',
       geometry: { type: 'Point', coordinates: [f.longitude, f.latitude] },
       properties: { frp: f.frp || 5, confidence: f.confidence === 'high' ? 0.9 : f.confidence === 'nominal' ? 0.7 : 0.5, time: f.acq_time || '', source: 'VIIRS NOAA-20' }
-    }));
-  }
-  // Show top-30 most vulnerable beats as monitoring points (not all 747)
-  if (state.realData && state.realData.beats) {
-    const sorted = [...state.realData.beats].sort((a, b) => (b.vulnerability || 0) - (a.vulnerability || 0));
-    return sorted.slice(0, 30).map(b => ({
-      type: 'Feature',
-      geometry: { type: 'Point', coordinates: [b.lon, b.lat] },
-      properties: { frp: (b.vulnerability || 0) * 50, confidence: b.vulnerability || 0.01, time: 'Vuln: ' + (b.vulnerability || 0).toFixed(3), source: 'JwalaNetra Vulnerability' }
     }));
   }
   return [];
