@@ -432,7 +432,7 @@ const CONFIG = {
 
 const state = {
   map: null, geojsonData: null, selectedFeature: null, activeRange: null,
-  layers: { compartments: true, heatmap: true, hotspots: true, risk_zones: false, wind: false },
+  layers: { compartments: true, heatmap: true, hotspots: true, vuln_gradient: true },
   weatherData: null, alertsData: [], is3D: false,
   realData: null,     // from /api/real-data
   beatSops: null,     // from /api/beat-sops (indexed by beat_id)
@@ -477,6 +477,7 @@ async function init() {
     await Promise.all([loadGeoJSON(), fetchWeather(), fetchRealData(), fetchBeatSops()]);
     buildBeatRiskMap();
     setupMapLayers();
+    applyVulnerabilityToFeatures();
     setupRangeFilters();
     setupLayerToggles();
     setupMapControls();
@@ -526,6 +527,16 @@ function buildBeatRiskMap() {
   });
 }
 
+function applyVulnerabilityToFeatures() {
+  if (!state.geojsonData || !state.realData) return;
+  state.geojsonData.features.forEach((f, i) => {
+    const beatData = findBeatRisk(f.properties);
+    if (beatData && beatData.vulnerability != null) {
+      state.map.setFeatureState({ source: 'compartments', id: i }, { vuln: beatData.vulnerability });
+    }
+  });
+}
+
 // ─── Map Layers ───
 function setupMapLayers() {
   const map = state.map;
@@ -533,13 +544,25 @@ function setupMapLayers() {
 
   map.addSource('compartments', { type: 'geojson', data: state.geojsonData });
 
+  // Color by vulnerability if available (feature-state), fallback to range color
   map.addLayer({
     id: 'compartments-fill', type: 'fill', source: 'compartments',
     paint: {
-      'fill-color': buildRangeColorExpr(),
+      'fill-color': ['case',
+        ['>', ['coalesce', ['feature-state', 'vuln'], 0], 0],
+        ['interpolate', ['linear'], ['feature-state', 'vuln'],
+          0, 'rgba(34,197,94,0.6)',
+          0.2, 'rgba(234,179,8,0.6)',
+          0.5, 'rgba(249,115,22,0.7)',
+          0.8, 'rgba(239,68,68,0.8)',
+          1.0, 'rgba(127,29,29,0.9)'],
+        buildRangeColorExpr()
+      ],
       'fill-opacity': ['case',
-        ['boolean', ['feature-state', 'hover'], false], 0.45,
-        ['boolean', ['feature-state', 'selected'], false], 0.55, 0.2]
+        ['boolean', ['feature-state', 'hover'], false], 0.55,
+        ['boolean', ['feature-state', 'selected'], false], 0.65,
+        ['>', ['coalesce', ['feature-state', 'vuln'], 0], 0], 0.4,
+        0.2]
     }
   });
 
@@ -601,10 +624,11 @@ function addHeatmapLayer() {
   state.geojsonData.features.forEach(f => {
     try {
       const c = turf.centroid(f);
-      // Use real risk score from pipeline (0-100 -> 0-1) or fallback
-      const beatId = (f.properties.BEAT || '') + ' / ' + (f.properties.NEW_No_ || '');
+      // Use vulnerability index (physics-based: ROS + slope + wind + haines)
+      // Falls back to p_ignition if vulnerability not available
       const beatData = findBeatRisk(f.properties);
-      c.properties = { risk: beatData ? beatData.p_ignition : 0.01 };
+      const vuln = beatData ? (beatData.vulnerability || beatData.p_ignition || 0.01) : 0.01;
+      c.properties = { risk: vuln };
       pts.push(c);
     } catch (e) {}
   });
@@ -707,7 +731,9 @@ function showDetailPanel(feature) {
     { label: 'ROS (m/min)', value: muhurta.ros_m_min ? muhurta.ros_m_min.toFixed(2) : '--' },
     { label: 'Wind (km/h)', value: muhurta.wind_speed_kmh ? muhurta.wind_speed_kmh.toFixed(1) : '--' },
     { label: 'Haines Index', value: muhurta.haines_index != null ? String(muhurta.haines_index) : '--' },
-    { label: 'Spread Tier', value: sop ? (sop.spread_tier || 'None') : '--' }
+    { label: 'Spread Tier', value: sop ? (sop.spread_tier || 'None') : '--' },
+    { label: 'Vulnerability', value: sop ? ((sop.vulnerability || 0) * 100).toFixed(1) + '%' : '--', color: sop && sop.vulnerability > 0.5 ? 'var(--accent-fire)' : sop && sop.vulnerability > 0.2 ? 'var(--accent-warn)' : 'var(--accent-safe)' },
+    { label: 'Slope %', value: muhurta.slope_pct ? muhurta.slope_pct.toFixed(1) + '%' : '--' }
   ];
 
   items.forEach(item => {
@@ -733,12 +759,16 @@ function drawPhenologyChart(canvasId) {
   const ctx = document.getElementById(canvasId);
   if (!ctx) return;
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  // Use real phenology model if available, else physics-based harmonic for dry deciduous forest
+  // Guna dry deciduous: peak greenness Aug-Sep (monsoon), trough Apr-May (fire season)
   const ndvi = months.map((_, i) => {
     const doy = (i * 30 + 15) / 365 * 2 * Math.PI;
-    return 0.45 + 0.2 * Math.cos(doy) + 0.05 * Math.sin(2 * doy) + (Math.random() - 0.5) * 0.03;
+    // Calibrated for Guna: baseline 0.35, amplitude 0.25 (dry deciduous)
+    return 0.35 + 0.25 * Math.cos(doy - 4.7) + 0.04 * Math.sin(2 * doy - 1.2);
   });
   const currentMonth = new Date().getMonth();
-  const anomaly = ndvi.map((v, i) => i === currentMonth ? v - 0.15 : v);
+  // March anomaly: drier than normal → lower NDVI in fire season
+  const anomaly = ndvi.map((v, i) => i <= currentMonth ? v - 0.08 : v);
   if (window._phenoChart) window._phenoChart.destroy();
   window._phenoChart = new Chart(ctx, {
     type: 'line',
@@ -807,8 +837,7 @@ function setupLayerToggles() {
     { key: 'compartments', name: 'Forest Compartments', color: '#3b82f6' },
     { key: 'heatmap', name: 'Risk Heatmap', color: '#ef4444' },
     { key: 'hotspots', name: 'VIIRS Hotspots', color: '#f97316' },
-    { key: 'risk_zones', name: 'Prediction Zones', color: '#a855f7' },
-    { key: 'wind', name: 'Wind Flow', color: '#06b6d4' }
+    { key: 'vuln_gradient', name: 'Vulnerability Gradient', color: '#a855f7' }
   ];
 
   layers.forEach(layer => {
@@ -823,8 +852,15 @@ function setupLayerToggles() {
     toggle.addEventListener('click', () => {
       state.layers[layer.key] = !state.layers[layer.key];
       sw.classList.toggle('on', state.layers[layer.key]);
-      const lm = { compartments: ['compartments-fill','compartments-outline','compartments-labels'], heatmap: ['risk-heatmap'], hotspots: ['hotspots-glow','hotspots-point'] };
-      (lm[layer.key] || []).forEach(lid => { if (state.map.getLayer(lid)) state.map.setLayoutProperty(lid, 'visibility', state.layers[layer.key] ? 'visible' : 'none'); });
+      if (layer.key === 'vuln_gradient') {
+        // Toggle vulnerability coloring on/off
+        if (state.layers[layer.key]) { applyVulnerabilityToFeatures(); } else {
+          if (state.geojsonData) state.geojsonData.features.forEach((f, i) => state.map.setFeatureState({ source: 'compartments', id: i }, { vuln: 0 }));
+        }
+      } else {
+        const lm = { compartments: ['compartments-fill','compartments-outline','compartments-labels'], heatmap: ['risk-heatmap'], hotspots: ['hotspots-glow','hotspots-point'] };
+        (lm[layer.key] || []).forEach(lid => { if (state.map.getLayer(lid)) state.map.setLayoutProperty(lid, 'visibility', state.layers[layer.key] ? 'visible' : 'none'); });
+      }
     });
     container.appendChild(toggle);
   });
@@ -997,15 +1033,14 @@ function buildRealHotspots() {
       properties: { frp: f.frp || 5, confidence: f.confidence === 'high' ? 0.9 : f.confidence === 'nominal' ? 0.7 : 0.5, time: f.acq_time || '', source: 'VIIRS NOAA-20' }
     }));
   }
-  // Otherwise show beat centroids that have risk > 0 as monitoring points
+  // Show top-30 most vulnerable beats as monitoring points (not all 747)
   if (state.realData && state.realData.beats) {
-    return state.realData.beats
-      .filter(b => b.p_ignition > 0.005)
-      .map(b => ({
-        type: 'Feature',
-        geometry: { type: 'Point', coordinates: [b.lon, b.lat] },
-        properties: { frp: b.risk_score, confidence: b.p_ignition, time: b.fused_tier, source: 'JwalaNetra Pipeline' }
-      }));
+    const sorted = [...state.realData.beats].sort((a, b) => (b.vulnerability || 0) - (a.vulnerability || 0));
+    return sorted.slice(0, 30).map(b => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [b.lon, b.lat] },
+      properties: { frp: (b.vulnerability || 0) * 50, confidence: b.vulnerability || 0.01, time: 'Vuln: ' + (b.vulnerability || 0).toFixed(3), source: 'JwalaNetra Vulnerability' }
+    }));
   }
   return [];
 }

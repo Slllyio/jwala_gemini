@@ -106,6 +106,33 @@ def build_real_dashboard_data():
     data["sops"] = sops
     data["sop_count"] = len(sops)
 
+    # 3b. Compute per-beat vulnerability index from muhurta physics
+    # When p_ignition is uniform (e.g., all CLEAR day), this gives
+    # a physically-meaningful gradient for heatmap visualization.
+    for sop in sops:
+        m = sop.get("muhurta", {})
+        ros = m.get("ros_m_min", 0) or 0
+        slope = m.get("slope_pct", 0) or 0
+        wind = m.get("wind_speed_kmh", 0) or 0
+        haines = m.get("haines_index", 0) or 0
+        # Normalize each: ROS 0-1 (range ~0.43-0.52), slope 0-1 (1.6-12.3), wind 0-1 (20-21)
+        ros_n = min(1.0, max(0, (ros - 0.42) / 0.1))
+        slope_n = min(1.0, max(0, (slope - 1.5) / 11.0))
+        wind_n = min(1.0, max(0, (wind - 19.5) / 2.0))
+        haines_n = min(1.0, max(0, (haines - 3) / 3.0))
+        # Composite vulnerability (weighted)
+        vuln = 0.35 * ros_n + 0.30 * slope_n + 0.20 * wind_n + 0.15 * haines_n
+        sop["vulnerability"] = round(vuln, 4)
+
+    # Also add vulnerability to beats array
+    sop_map = {s["beat_id"]: s for s in sops}
+    for b in data.get("beats", []):
+        s = sop_map.get(b.get("beat_id"))
+        if s:
+            b["vulnerability"] = s.get("vulnerability", 0)
+            b["ros"] = s.get("muhurta", {}).get("ros_m_min", 0)
+            b["slope"] = s.get("muhurta", {}).get("slope_pct", 0)
+
     # 4. Phenology models (real harmonic coefficients)
     phenology = {}
     if PHENOLOGY_DIR.exists():
