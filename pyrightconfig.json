@@ -1,0 +1,12 @@
+{
+  "venvPath": "c:\\Users\\S.C.C\\.gemini\\antigravity\\playground\\twilight-oort\\prithvi-forest-change",
+  "venv": ".venv",
+  "pythonVersion": "3.12",
+  "pythonPlatform": "Windows",
+  "typeCheckingMode": "basic",
+  "useLibraryCodeForTypes": true,
+  "reportMissingImports": "warning",
+  "reportMissingModuleSource": "none",
+  "include": ["src"],
+  "exclude": ["**/__pycache__", ".venv", "outputs", "data"]
+}

@@ -1,0 +1,179 @@
+# ============================================================
+# Van Suraksha Pipeline — Docker Compose
+# Services: PostGIS · Pipeline App · FastAPI · Jupyter
+#
+# Quick-start:
+#   docker compose up -d postgis            # DB only
+#   docker compose up -d postgis api        # DB + REST API
+#   docker compose up -d                    # all services
+#
+# Run a pipeline step once-off:
+#   docker compose run --rm app --steps ingest
+#   docker compose run --rm app --steps beat_report
+#
+# Environment overrides (create a .env file or export before running):
+#   VS_DB_PASSWORD   DB password          (default: postgres — change in prod!)
+#   VS_SLACK_WEBHOOK Slack webhook URL    (optional)
+#   VS_API_PORT      Host port for API    (default: 8000)
+#   VS_JUPYTER_PORT  Host port for Jup.  (default: 8888)
+#   VS_JUPYTER_TOKEN Notebook token       (default: vansuraksha)
+#   WORKERS          Uvicorn worker count (default: 2)
+# ============================================================
+
+x-db-env: &db-env
+  VS_DB_HOST: postgis
+  VS_DB_PORT: 5432
+  VS_DB_NAME: ${VS_DB_NAME:-gis_projects}
+  VS_DB_USER: ${VS_DB_USER:-postgres}
+  VS_DB_PASSWORD: ${VS_DB_PASSWORD:-postgres}
+
+x-common-volumes: &common-volumes
+  - ./data:/app/data:ro
+  - ./outputs:/app/outputs
+  - ./config.yaml:/app/config.yaml:ro
+  # Checkpoints: mount the host dir so inference has access to .pth files
+  # without baking them into the image (they can be 0.5–1.5 GB each).
+  - ./outputs/checkpoints:/app/outputs/checkpoints
+
+services:
+  # ── PostGIS Database ───────────────────────────────────────
+  postgis:
+    image: postgis/postgis:16-3.4
+    container_name: vansuraksha-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${VS_DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${VS_DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${VS_DB_NAME:-gis_projects}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${VS_DB_USER:-postgres} -d ${VS_DB_NAME:-gis_projects}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ── DB Migrations (runs once, exits) ──────────────────────
+  # Applies ADD COLUMN IF NOT EXISTS migrations before the app starts.
+  # Re-running is safe (idempotent).
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: app
+    container_name: vansuraksha-migrate
+    depends_on:
+      postgis:
+        condition: service_healthy
+    environment:
+      <<: *db-env
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    entrypoint: ["python", "scripts/db_sink.py", "--config", "config.yaml", "--init"]
+    restart: "no"
+
+  # ── FastAPI REST service ───────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    image: vansuraksha-api:latest
+    container_name: vansuraksha-api
+    restart: unless-stopped
+    depends_on:
+      postgis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *db-env
+      VS_SLACK_WEBHOOK: ${VS_SLACK_WEBHOOK:-}
+      WORKERS: ${WORKERS:-2}
+    ports:
+      - "${VS_API_PORT:-8000}:8000"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./outputs:/app/outputs:ro          # read-only: API never writes outputs
+    entrypoint:
+      - uvicorn
+      - src.api.api:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --workers
+      - "${WORKERS:-2}"
+      - --log-level
+      - "info"
+      - --no-access-log
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
+
+  # ── Pipeline App (one-shot / cron tasks) ──────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: app
+    image: vansuraksha-app:latest
+    container_name: vansuraksha-app
+    depends_on:
+      postgis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *db-env
+      VS_SLACK_WEBHOOK: ${VS_SLACK_WEBHOOK:-}
+    volumes: *common-volumes
+    working_dir: /app
+    # No automatic restart — pipeline steps are invoked explicitly:
+    #   docker compose run --rm app --steps ingest beat_report
+    restart: "no"
+
+  # ── Jupyter Notebook Server ────────────────────────────────
+  jupyter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: app
+    container_name: vansuraksha-jupyter
+    restart: unless-stopped
+    depends_on:
+      postgis:
+        condition: service_healthy
+    environment:
+      <<: *db-env
+    ports:
+      - "${VS_JUPYTER_PORT:-8888}:8888"
+    volumes:
+      - ./notebooks:/app/notebooks
+      - ./outputs:/app/outputs:ro
+      - ./data:/app/data:ro
+    entrypoint:
+      - jupyter
+      - notebook
+      - --ip=0.0.0.0
+      - --port=8888
+      - --no-browser
+      - --allow-root
+      - --NotebookApp.token=${VS_JUPYTER_TOKEN:-vansuraksha}
+    working_dir: /app/notebooks
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8888/api || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  pgdata:
+    driver: local

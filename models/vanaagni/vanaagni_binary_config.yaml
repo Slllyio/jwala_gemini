@@ -1,0 +1,104 @@
+# ==========================================================================
+# VanAgni Training Configuration  (600M-TL + Binary fire/no-fire)
+# ==========================================================================
+# Binary segmentation: collapse severity labels 1-4 into fire=1.
+# Warm-start from E15 best 5-class checkpoint (backbone + decoder + FiLM).
+#
+# Usage:
+#   python src/train/train_vanaagni.py \
+#     --config models/vanaagni/vanaagni_binary_config.yaml \
+#     --resume outputs/vanaagni/checkpoints/best_vanaagni.pth \
+#     --tag "binary_from_e15"
+# ==========================================================================
+
+# --------------------------------------------------------------------------
+# Model Architecture
+# --------------------------------------------------------------------------
+model:
+  eo2_variant:        "600M-TL"
+  num_frames:         3
+  in_chans:           6
+  img_size:           224
+  backbone_init_from: null
+  freeze_backbone:    false
+  decoder_channels:   [512, 256, 128, 64]
+  weather_input_dim:  10
+  weather_cond_dim:   128
+
+  # Binary classification: 0=no_fire, 1=fire
+  num_classes:        2
+  dropout:            0.1
+
+
+# --------------------------------------------------------------------------
+# Data
+# --------------------------------------------------------------------------
+data:
+  manifest_path:      "data_lake/training_patches/manifest.csv"
+  num_workers:        2
+  fire_oversample:    5.0
+  min_fire_pixels:    25
+  exclude_tiers:      null
+  burn_intensity_dir: null              # Not used for binary
+
+
+# --------------------------------------------------------------------------
+# LoRA — DISABLED
+# --------------------------------------------------------------------------
+lora:
+  enabled:          false
+  rank:             16
+  alpha:            32
+  dropout:          0.05
+  target_modules:
+    - "attn.qkv"
+    - "attn.proj"
+
+
+# --------------------------------------------------------------------------
+# LLRD + Detach Prefix
+# --------------------------------------------------------------------------
+llrd:
+  enabled:          true
+  decay:            0.65
+  detach_prefix:    28
+
+
+# --------------------------------------------------------------------------
+# Training Schedule
+# --------------------------------------------------------------------------
+training:
+  epochs:                   60
+  freeze_backbone_epochs:   0             # Not used (LLRD single-phase)
+  batch_size:               1
+  grad_accum_steps:         8
+
+  # Slightly lower LR for binary fine-tuning from pre-trained decoder
+  lr:                       3.0e-5
+
+  warmup_epochs:            3
+  min_lr_fraction:          0.01
+  weight_decay:             0.01
+  amp:                      true
+
+  # Binary loss: [no_fire_weight, fire_weight]
+  # Fire is minority (~10% of val patches, sparse pixels) -> heavy upweight
+  loss_weights:             [0.1, 0.9]
+  focal_gamma:              2.0
+  dice_weight:              0.5
+
+  # Evaluation: use 0.5 during training (= argmax for softmax).
+  # Post-training, sweep thresholds on val set for optimal operating point.
+  eval_threshold:           0.5
+
+  log_interval:             20
+  save_every_epochs:        10
+  early_stop_patience:      20
+
+
+# --------------------------------------------------------------------------
+# Paths
+# --------------------------------------------------------------------------
+paths:
+  output_dir:         "outputs/vanaagni_binary"
+  checkpoint_dir:     "outputs/vanaagni_binary/checkpoints"

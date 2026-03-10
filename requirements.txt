@@ -1,0 +1,94 @@
+# ============================================================
+# Prithvi Forest Change Detection — Requirements
+# Install: pip install -r requirements.txt
+# ============================================================
+
+# Google Earth Engine
+earthengine-api>=0.1.390
+geemap>=0.28.0
+
+# HuggingFace / Model
+huggingface_hub>=0.20.3
+transformers>=4.37.0
+timm>=0.9.12
+
+# PyTorch -- AMD ROCm on Windows (RX 9000 series / RDNA 4)
+# Requires: AMD Adrenalin 26.1.1+ driver  |  Python 3.12
+# CORRECT install command (Windows path is /rocm/windows/, NOT /rocm/manylinux/):
+#   pip install rocm_sdk_core torch torchvision torchaudio \
+#     --index-url https://repo.radeon.com/rocm/windows/rocm-rel-7.2/
+# Or just run: .\scripts\setup_rocm_env.ps1
+torch>=2.9.1
+torchvision>=0.24.1
+torchaudio>=2.9.1
+
+# Geospatial
+rasterio>=1.3.9
+geopandas>=0.14.3
+pyproj>=3.6.1
+shapely>=2.0.3
+fiona>=1.9.5
+
+# Data handling
+numpy==1.26.4  # pinned: numpy 2.x incompatible with ROCm 7.2 wheels
+pandas>=2.1.4
+scikit-learn>=1.3.2
+scipy>=1.12.0
+
+# Visualization
+folium>=0.15.1
+matplotlib>=3.8.2
+seaborn>=0.13.1
+plotly>=5.18.0
+
+# Utilities
+tqdm>=4.66.1
+pyyaml>=6.0.1
+einops>=0.7.0
+tensorboard>=2.15.1
+Pillow>=10.2.0       # KMZ overlay PNG rendering (generate_alerts.py)
+
+# Database
+psycopg[binary]>=3.1.0
+
+# Monitoring & Notifications
+requests>=2.31.0
+python-json-logger>=2.0.7
+
+# Notebooks
+jupyter>=1.0.0
+ipywidgets>=8.1.1
+
+# API & Dashboard
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+streamlit>=1.31.0
+
+# Alert Filter
+lightgbm>=4.2.0
+
+# ── Geospatial Data Download Strategy (PDF implementation) ──────────────────
+# HLS imagery via NASA Earthdata (earthaccess_ingest.py)
+earthaccess>=0.10.0
+
+# GFS / ECMWF weather forecasts (weather_ingest.py)
+herbie-data>=2024.9.0
+
+# FIRMS VIIRS — GeoParquet storage (firms_ingest.py)
+pyarrow>=14.0.0            # required by geopandas .to_parquet / .read_parquet
+
+# Fire dynamics — DBSCAN clustering, alpha hull (fire_dynamics.py)
+scikit-learn>=1.3.2        # already pinned above; explicit for clarity
+scipy>=1.12.0              # Delaunay triangulation for alpha hull
+
+# Zarr — chunked, parallel access for meteorological temporal stacks
+zarr>=2.16.1
+numcodecs>=0.12.1          # zarr compression codecs
+
+# xarray — NetCDF4 / Zarr weather data handling
+xarray>=2023.12.0
+netCDF4>=1.6.5             # backend for xarray NetCDF I/O
+cfgrib>=0.9.12             # GRIB2 backend for xarray (herbie output)
+
+# Delta Lake / ACID tabular fire data (optional, heavy dependency)
+# deltalake>=0.14.0        # uncomment if Delta Lake ACID transactions needed

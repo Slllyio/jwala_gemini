@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+    <meta charset='UTF-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>Vanaagni Horizon v3.0 | AI Command Center</title>
+    <link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css' />
+    <link href='https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@300;500;700&display=swap' rel='stylesheet'>
+    <style>
+        :root {
+            --bg-deep: #050608;
+            --panel-bg: rgba(10, 12, 18, 0.92);
+            --fire-neon: #ff5f00;
+            --cyan-neon: #00f2ff;
+            --border-glow: rgba(0, 242, 255, 0.25);
+            --text-main: #e0e0e0;
+        }
+
+        body, html { margin: 0; padding: 0; height: 100%; background: var(--bg-deep); font-family: 'Rajdhani', sans-serif; color: var(--text-main); overflow: hidden; }
+
+        #app-container {
+            display: grid;
+            grid-template-columns: 380px 1fr 350px;
+            grid-template-rows: 80px 1fr 180px;
+            height: 100vh; gap: 10px; padding: 10px; box-sizing: border-box;
+        }
+
+        header {
+            grid-column: 1 / 4; background: var(--panel-bg); border: 1px solid var(--border-glow);
+            backdrop-filter: blur(20px); display: flex; align-items: center; justify-content: space-between;
+            padding: 0 30px; border-radius: 8px; z-index: 2000;
+        }
+
+        .logo { font-family: 'Orbitron', sans-serif; font-size: 26px; color: var(--cyan-neon); text-shadow: 0 0 20px var(--cyan-neon); letter-spacing: 2px; }
+
+        .sidebar-left {
+            grid-column: 1; grid-row: 2 / 3; background: var(--panel-bg); border: 1px solid var(--border-glow);
+            border-radius: 8px; padding: 25px; display: flex; flex-direction: column; gap: 15px; z-index: 2000; overflow-y: auto;
+        }
+
+        .panel-title { font-family: 'Orbitron', sans-serif; font-size: 14px; color: var(--cyan-neon); border-bottom: 1px solid var(--border-glow); padding-bottom: 10px; margin-bottom: 5px; text-transform: uppercase; }
+
+        .watch-item {
+            background: rgba(255, 95, 0, 0.08); border: 1px solid rgba(255, 95, 0, 0.3);
+            padding: 18px; border-radius: 6px; cursor: pointer; transition: 0.4s;
+            display: flex; justify-content: space-between; align-items: center;
+            position: relative; overflow: hidden;
+        }
+        .watch-item:hover { background: rgba(255, 95, 0, 0.2); border-color: var(--fire-neon); box-shadow: 0 0 20px rgba(255, 95, 0, 0.2); transform: scale(1.03); }
+        .watch-item::before { content: ''; position: absolute; left: 0; top: 0; width: 4px; height: 100%; background: var(--fire-neon); }
+        .watch-id { font-weight: 700; font-size: 20px; color: var(--fire-neon); font-family: 'Orbitron'; }
+        .watch-meta { font-size: 13px; color: #aaa; }
+
+        #map { grid-column: 2; grid-row: 2 / 3; border: 1px solid var(--border-glow); border-radius: 8px; z-index: 1; background: #000; }
+
+        .sidebar-right {
+            grid-column: 3; grid-row: 2 / 3; background: var(--panel-bg); border: 1px solid var(--border-glow);
+            border-radius: 8px; padding: 25px; z-index: 2000; overflow-y: auto;
+        }
+
+        footer { grid-column: 1 / 4; background: var(--panel-bg); border: 1px solid var(--border-glow); border-radius: 8px; padding: 20px; font-family: 'Courier New', monospace; font-size: 13px; z-index: 2000; overflow-y: auto; }
+
+        .btn-action {
+            background: transparent; border: 1px solid var(--fire-neon); color: var(--fire-neon);
+            padding: 10px 20px; cursor: pointer; font-family: 'Orbitron'; font-size: 11px; transition: 0.3s;
+            border-radius: 4px;
+        }
+        .btn-action:hover { background: var(--fire-neon); color: #000; box-shadow: 0 0 20px var(--fire-neon); }
+
+        .range-filter { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
+        .range-btn {
+            background: rgba(0, 242, 255, 0.08); border: 1px solid var(--border-glow); color: var(--cyan-neon);
+            padding: 4px 10px; cursor: pointer; font-family: 'Rajdhani'; font-size: 12px; border-radius: 3px; transition: 0.3s;
+        }
+        .range-btn:hover, .range-btn.active { background: rgba(0, 242, 255, 0.25); border-color: var(--cyan-neon); }
+
+        .detail-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 14px; }
+        .detail-label { color: #888; }
+        .detail-value { color: var(--cyan-neon); font-weight: 600; }
+
+        .weather-card {
+            background: rgba(255, 95, 0, 0.06); border: 1px solid rgba(255, 95, 0, 0.2);
+            padding: 12px; border-radius: 6px; margin-top: 8px;
+        }
+        .weather-card .wc-title { font-family: 'Orbitron'; font-size: 12px; color: var(--fire-neon); margin-bottom: 8px; }
+        .weather-row { display: flex; justify-content: space-between; font-size: 13px; padding: 3px 0; }
+        .weather-label { color: #888; }
+        .weather-val { color: var(--cyan-neon); font-weight: 600; }
+
+        #feature-count { font-size: 12px; color: #888; margin-top: 4px; }
+
+        .dark-tooltip {
+            background: rgba(10, 12, 18, 0.95) !important;
+            border: 1px solid var(--cyan-neon) !important;
+            color: #e0e0e0 !important;
+            font-family: 'Rajdhani', sans-serif !important;
+            font-size: 13px !important;
+            padding: 6px 10px !important;
+            border-radius: 4px !important;
+            box-shadow: 0 0 15px rgba(0, 242, 255, 0.3) !important;
+        }
+    </style>
+</head>
+<body>
+
+<div id='app-container'>
+    <header>
+        <div class='logo'>VANAAGNI HORIZON 3.0</div>
+        <div style='display:flex; gap:40px;'>
+            <div style='text-align:right;'><div style='font-size:11px; color:#888;'>GUNA DIVISION</div><div style='font-size:20px; color:var(--fire-neon);' id='feat-count'>-- compartments</div></div>
+            <div style='text-align:right;'><div style='font-size:11px; color:#888;'>MISSION CLOCK</div><div style='font-size:20px; color:var(--cyan-neon);' id='clock'>--:--:--</div></div>
+        </div>
+        <button class='btn-action' onclick='window.location.reload()'>SYSTEM REBOOT</button>
+    </header>
+
+    <div class='sidebar-left'>
+        <div class='panel-title'>Range Filter</div>
+        <div class='range-filter' id='range-filters'></div>
+        <div id='feature-count'></div>
+
+        <div class='panel-title' style='margin-top:10px;'>Active Watchlist</div>
+        <div id='watchlist'>
+            <div class='watch-item' id='btn-zoom-198'>
+                <div>
+                    <div class='watch-id'>C-198</div>
+                    <div class='watch-meta'>KHADAGPUR | Ridge-Spine</div>
+                </div>
+                <div style='color:var(--fire-neon); font-weight:700; font-size:18px;'>60.62</div>
+            </div>
+            <br>
+            <div class='watch-item' style='opacity:0.4; cursor:default;' title='Sensor offline - awaiting reconnection'>
+                <div>
+                    <div class='watch-id'>C-199</div>
+                    <div class='watch-meta'>KHADAGPUR | Valley-Base</div>
+                </div>
+                <div style='color:#ffaa00; font-weight:700; font-size:18px;'>OFFLINE</div>
+            </div>
+        </div>
+
+        <div class='panel-title' style='margin-top:10px;'>Weather Intel</div>
+        <div id='weather-panel' style='font-size:13px; color:#888;'>Loading weather data...</div>
+
+        <div class='panel-title' style='margin-top:10px;'>AI Strategic Intel</div>
+        <div id='commander-intel' style='font-size:15px; color:#fff; line-height:1.7; background:rgba(0,242,255,0.08); padding:20px; border-radius:6px; border: 1px solid var(--cyan-neon);'>
+            AUTHENTICATED.<br>Click any <b>compartment polygon</b> on the map for details, or select <b>C-198</b> to deploy tactical overlays.
+        </div>
+    </div>
+
+    <div id='map'></div>
+
+    <div class='sidebar-right'>
+        <div class='panel-title'>Compartment Details</div>
+        <div id='polygon-details' style='font-size:15px; line-height:2; color:#888;'>
+            Click a polygon on the map to view details.
+        </div>
+
+        <div class='panel-title' style='margin-top:20px;'>Tactical Analytics</div>
+        <div style='font-size:15px; line-height:2.2;'>
+            Model: <span style='color:var(--cyan-neon)'>Prithvi-EO-2.0</span><br>
+            Quantization: <span style='color:var(--cyan-neon)'>FP8</span><br>
+            Spread Engine: <span style='color:var(--cyan-neon)'>Calibrated</span><br>
+            CFL Mode: <span style='color:var(--cyan-neon)'>Terrain-Aware</span>
+        </div>
+    </div>
+
+    <footer>
+        <div id='log-ticker'></div>
+    </footer>
+</div>
+
+<script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+
+    // --- Utilities ---
+    function logMsg(msg, color) {
+        var ts = new Date().toLocaleTimeString();
+        var span = document.createElement('span');
+        span.style.color = color || '#aaa';
+        span.textContent = '[LOG] ' + ts + ' - ' + msg;
+        var ticker = document.getElementById('log-ticker');
+        ticker.appendChild(span);
+        ticker.appendChild(document.createElement('br'));
+        ticker.scrollTop = ticker.scrollHeight;
+    }
+
+    function setDetails(props) {
+        var container = document.getElementById('polygon-details');
+        container.textContent = '';
+        var fields = [
+            ['Compartment', props.NEW_No_ || 'N/A'],
+            ['Beat', props.BEAT || 'N/A'],
+            ['Range', props.RANGE || 'N/A'],
+            ['Sub-Range', props.SUB_RANGE || 'N/A'],
+            ['Area (2015)', (props.area2015 || 'N/A') + ' ha'],
+            ['Area (Origin)', (props.areaOrigin || 'N/A') + ' ha']
+        ];
+        fields.forEach(function(pair) {
+            var row = document.createElement('div');
+            row.className = 'detail-row';
+            var label = document.createElement('span');
+            label.className = 'detail-label';
+            label.textContent = pair[0];
+            var value = document.createElement('span');
+            value.className = 'detail-value';
+            value.textContent = pair[1];
+            row.appendChild(label);
+            row.appendChild(value);
+            container.appendChild(row);
+        });
+    }
+
+    // --- Clock ---
+    setInterval(function() {
+        document.getElementById('clock').textContent = new Date().toLocaleTimeString();
+    }, 1000);
+
+    // --- Map Init ---
+    var map = L.map('map', { zoomControl: true }).setView([24.40, 77.15], 10);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
+        maxZoom: 19
+    }).addTo(map);
+
+    logMsg('Map initialized. Loading Guna Division GeoJSON...', '#aaa');
+
+    // --- State ---
+    var geoLayer = null;
+    var allFeatures = null;
+    var selectedLayer = null;
+    var activeOverlays = [];
+    var activeRanges = {};
+
+    // --- Range color map ---
+    var rangeColors = {
+        'ARON': '#ff6b6b',
+        'BAMORI': '#ffa94d',
+        'BINAGANJ': '#ffd43b',
+        'FATEHGARH': '#69db7c',
+        'GUNA NORTH': '#4dabf7',
+        'GUNA SOUTH': '#748ffc',
+        'M GARH': '#da77f2',
+        'RAGHOGARH': '#f783ac'
+    };
+
+    function getColor(range) {
+        return rangeColors[range] || '#00f2ff';
+    }
+
+    function defaultStyle(feature) {
+        var range = feature.properties.RANGE || '';
+        return { color: getColor(range), weight: 1.5, fillColor: getColor(range), fillOpacity: 0.12, opacity: 0.7 };
+    }
+
+    function highlightStyle() {
+        return { color: '#00f2ff', weight: 3, fillColor: '#00f2ff', fillOpacity: 0.35, opacity: 1 };
+    }
+
+    // --- Polygon click handler (GEE-style) ---
+    function onEachFeature(feature, layer) {
+        layer.on('click', function() {
+            if (selectedLayer && selectedLayer !== layer) {
+                geoLayer.resetStyle(selectedLayer);
+            }
+            selectedLayer = layer;
+            layer.setStyle(highlightStyle());
+            setDetails(feature.properties);
+            logMsg('Selected: ' + (feature.properties.NEW_No_ || '?') + ' | ' + (feature.properties.BEAT || '?') + ' | ' + (feature.properties.RANGE || '?'), '#00f2ff');
+            map.fitBounds(layer.getBounds(), { padding: [40, 40], maxZoom: 15 });
+        });
+
+        layer.on('mouseover', function() {
+            if (layer !== selectedLayer) {
+                layer.setStyle({ weight: 2.5, fillOpacity: 0.25, opacity: 1 });
+            }
+            layer.bindTooltip(
+                (feature.properties.NEW_No_ || '') + ' | ' + (feature.properties.BEAT || '') + ' | ' + (feature.properties.RANGE || ''),
+                { sticky: true, className: 'dark-tooltip' }
+            ).openTooltip();
+        });
+
+        layer.on('mouseout', function() {
+            if (layer !== selectedLayer) {
+                geoLayer.resetStyle(layer);
+            }
+            layer.closeTooltip();
+        });
+    }
+
+    // --- Filter rendering ---
+    function renderGeo(features) {
+        if (geoLayer) { map.removeLayer(geoLayer); }
+        selectedLayer = null;
+        geoLayer = L.geoJSON({ type: 'FeatureCollection', features: features }, {
+            style: defaultStyle,
+            onEachFeature: onEachFeature
+        }).addTo(map);
+        document.getElementById('feature-count').textContent = features.length + ' compartments displayed';
+    }
+
+    function hasActiveRanges() {
+        for (var k in activeRanges) { if (activeRanges[k]) return true; }
+        return false;
+    }
+
+    function applyFilter() {
+        if (!allFeatures) return;
+        var hasFilter = hasActiveRanges();
+        var filtered = hasFilter
+            ? allFeatures.filter(function(f) { return activeRanges[f.properties.RANGE]; })
+            : allFeatures;
+        renderGeo(filtered);
+    }
+
+    // --- Build range filter buttons ---
+    function buildRangeFilters(ranges) {
+        var container = document.getElementById('range-filters');
+        var allBtn = document.createElement('button');
+        allBtn.className = 'range-btn active';
+        allBtn.textContent = 'ALL';
+        allBtn.onclick = function() {
+            activeRanges = {};
+            var btns = container.querySelectorAll('.range-btn');
+            for (var i = 0; i < btns.length; i++) btns[i].classList.remove('active');
+            allBtn.classList.add('active');
+            applyFilter();
+            if (geoLayer && geoLayer.getLayers().length > 0) map.fitBounds(geoLayer.getBounds(), { padding: [20, 20] });
+        };
+        container.appendChild(allBtn);
+
+        ranges.sort().forEach(function(range) {
+            var btn = document.createElement('button');
+            btn.className = 'range-btn';
+            btn.textContent = range;
+            btn.style.borderColor = getColor(range);
+            btn.style.color = getColor(range);
+            btn.onclick = function() {
+                if (activeRanges[range]) {
+                    delete activeRanges[range];
+                    btn.classList.remove('active');
+                } else {
+                    activeRanges[range] = true;
+                    btn.classList.add('active');
+                }
+                if (!hasActiveRanges()) {
+                    allBtn.classList.add('active');
+                } else {
+                    allBtn.classList.remove('active');
+                }
+                applyFilter();
+                if (geoLayer && geoLayer.getLayers().length > 0) map.fitBounds(geoLayer.getBounds(), { padding: [20, 20] });
+            };
+            container.appendChild(btn);
+        });
+    }
+
+    // --- Load GeoJSON ---
+    // The GeoJSON must be served over HTTP. Use: python -m http.server 8000
+    // Or copy gunafinal.geojson into the dashboard folder.
+    var paths = [
+        'gunafinal.geojson',
+        '../../../Portal_design_jwala_netra/geojson/gunafinal.geojson'
+    ];
+
+    function tryLoad(index) {
+        if (index >= paths.length) {
+            logMsg('ERROR: Could not load GeoJSON. Serve via HTTP: python -m http.server 8000', '#ff5f00');
+            document.getElementById('feat-count').textContent = 'LOAD ERROR';
+            document.getElementById('polygon-details').textContent = 'GeoJSON failed to load. Copy gunafinal.geojson to dashboard/ folder and serve via HTTP.';
+            return;
+        }
+        fetch(paths[index]).then(function(r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        }).then(function(data) {
+            onDataLoaded(data);
+        }).catch(function() {
+            tryLoad(index + 1);
+        });
+    }
+
+    function onDataLoaded(data) {
+        allFeatures = data.features;
+        document.getElementById('feat-count').textContent = allFeatures.length + ' compartments';
+        logMsg('Loaded ' + allFeatures.length + ' compartments from Guna Division.', '#00f2ff');
+
+        var ranges = [];
+        var seen = {};
+        allFeatures.forEach(function(f) {
+            var r = f.properties.RANGE;
+            if (r && !seen[r]) { seen[r] = true; ranges.push(r); }
+        });
+
+        buildRangeFilters(ranges);
+        renderGeo(allFeatures);
+        map.fitBounds(geoLayer.getBounds(), { padding: [20, 20] });
+        logMsg('All ' + allFeatures.length + ' compartments cached. ' + ranges.length + ' Ranges operational.', '#69db7c');
+    }
+
+    tryLoad(0);
+
+    // --- Watchlist: C-198 tactical overlay ---
+    document.getElementById('btn-zoom-198').onclick = function() {
+        logMsg('Deploying Intercept Protocol for C-198...', '#ff5f00');
+        map.flyTo([24.6816, 77.1767], 15, { duration: 3.5 });
+
+        var intel = document.getElementById('commander-intel');
+        intel.textContent = '';
+        var b1 = document.createElement('b');
+        b1.style.color = 'var(--fire-neon)';
+        b1.textContent = 'VULNERABILITY DETECTED';
+        intel.appendChild(b1);
+        intel.appendChild(document.createElement('br'));
+        intel.appendChild(document.createTextNode('Sector: C-198 (Ridge)'));
+        intel.appendChild(document.createElement('br'));
+        intel.appendChild(document.createElement('br'));
+        var b2 = document.createElement('b');
+        b2.textContent = 'TACTICAL PLAN:';
+        intel.appendChild(b2);
+        intel.appendChild(document.createElement('br'));
+        intel.appendChild(document.createTextNode('Establish 500m CFL along the 246\u00B0 spine. Fuel moisture is critical at ridge top. Advise patrol pre-deployment.'));
+
+        // Clear previous overlays
+        activeOverlays.forEach(function(o) { map.removeLayer(o); });
+        activeOverlays = [];
+
+        // Hotspots - simple static points with coordinates
+        var hotspots = [
+            { pos: [24.6826, 77.1777], id: 'H-1' },
+            { pos: [24.6806, 77.1787], id: 'H-2' },
+            { pos: [24.6836, 77.1757], id: 'H-3' }
+        ];
+        hotspots.forEach(function(h) {
+            var s = L.circleMarker(h.pos, {
+                radius: 8, color: '#ff5f00', fillColor: '#ff5f00', fillOpacity: 0.85, weight: 2
+            }).addTo(map);
+            s.bindTooltip(
+                h.id + ' [' + h.pos[0].toFixed(4) + ', ' + h.pos[1].toFixed(4) + ']',
+                { permanent: true, direction: 'right', className: 'dark-tooltip', offset: [10, 0] }
+            );
+            activeOverlays.push(s);
+        });
+
+        // Terrain-Aware CFL line
+        var cflPath = [
+            [24.6866, 77.1737], [24.6870, 77.1743], [24.6874, 77.1749], [24.6878, 77.1755],
+            [24.6882, 77.1761], [24.6886, 77.1767], [24.6890, 77.1773], [24.6894, 77.1779]
+        ];
+        var line = L.polyline(cflPath, { color: '#00f2ff', weight: 7, opacity: 1.0, dashArray: '12, 18' }).addTo(map);
+        line.bindTooltip('CFL Line (Terrain-Aware)', { sticky: true });
+        activeOverlays.push(line);
+
+        logMsg('C-198 Deep-Zoom active. Tactical assets projected.', '#00f2ff');
+    };
+
+    // --- Weather data for watchlist items (Open-Meteo free API) ---
+    var watchlistWeather = [
+        { id: 'C-198', label: 'KHADAGPUR Ridge-Spine', lat: 24.6816, lon: 77.1767 },
+        { id: 'C-199', label: 'KHADAGPUR Valley-Base', lat: 24.6750, lon: 77.1800 }
+    ];
+
+    function fetchWeather() {
+        var panel = document.getElementById('weather-panel');
+        panel.textContent = '';
+
+        watchlistWeather.forEach(function(w) {
+            var url = 'https://api.open-meteo.com/v1/forecast?latitude=' + w.lat +
+                '&longitude=' + w.lon +
+                '&current=temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m' +
+                '&daily=temperature_2m_max,temperature_2m_min,precipitation_sum' +
+                '&timezone=Asia/Kolkata&forecast_days=1';
+
+            fetch(url).then(function(r) { return r.json(); }).then(function(data) {
+                var c = data.current;
+                var d = data.daily;
+
+                var card = document.createElement('div');
+                card.className = 'weather-card';
+
+                var title = document.createElement('div');
+                title.className = 'wc-title';
+                title.textContent = w.id + ' | ' + w.label;
+                card.appendChild(title);
+
+                var rows = [
+                    ['Temperature', c.temperature_2m + '\u00B0C'],
+                    ['Humidity', c.relative_humidity_2m + '%'],
+                    ['Wind', c.wind_speed_10m + ' km/h @ ' + c.wind_direction_10m + '\u00B0'],
+                    ['Day Max/Min', d.temperature_2m_max[0] + '/' + d.temperature_2m_min[0] + '\u00B0C'],
+                    ['Precipitation', d.precipitation_sum[0] + ' mm'],
+                    ['Coordinates', w.lat.toFixed(4) + ', ' + w.lon.toFixed(4)]
+                ];
+
+                rows.forEach(function(pair) {
+                    var row = document.createElement('div');
+                    row.className = 'weather-row';
+                    var lbl = document.createElement('span');
+                    lbl.className = 'weather-label';
+                    lbl.textContent = pair[0];
+                    var val = document.createElement('span');
+                    val.className = 'weather-val';
+                    val.textContent = pair[1];
+                    row.appendChild(lbl);
+                    row.appendChild(val);
+                    card.appendChild(row);
+                });
+
+                panel.appendChild(card);
+                logMsg('Weather loaded for ' + w.id + ': ' + c.temperature_2m + '\u00B0C, RH ' + c.relative_humidity_2m + '%', '#69db7c');
+            }).catch(function(err) {
+                var errDiv = document.createElement('div');
+                errDiv.className = 'weather-card';
+                errDiv.textContent = w.id + ': Weather unavailable (' + err.message + ')';
+                panel.appendChild(errDiv);
+            });
+        });
+    }
+
+    fetchWeather();
+    // Refresh weather every 10 minutes
+    setInterval(fetchWeather, 600000);
+});
+</script>
+
+</body>
+</html>

@@ -1,0 +1,270 @@
+# ============================================================
+# Prithvi Forest Monitor — Van Suraksha Alert System
+# AOI: Guna Division, Madhya Pradesh (Dry Deciduous)
+#      8 Ranges | 139 Beats | ~2144 sq km
+#      Beat shapefile: configure paths.mp_beats_shp below
+# ============================================================
+
+gee:
+  aoi_asset: "projects/van-suraksha-alert/assets/RANGE_BAMORI"  # Bamori Range, Guna Division
+  guna_beats_geojson: "data/aoi/guna_beats.geojson"    # V3: full division beat boundaries (local)
+  guna_division_geojson: "data/aoi/guna_division.geojson" # V3: dissolved division boundary
+  gee_project: "van-suraksha-alert"                     # registered GEE Cloud project
+  date_range: ["2023-01-01", "2023-12-31"]             # Bamori test window
+  tile_scale: 10                                        # V2: 10m Sentinel-2 (224px = 2.24km chip)
+  cloud_threshold: 20                                   # max cloud cover %
+  hansen_collection: "UMD/hansen/global_forest_change_2024_v1_12"
+  hls_collection: "USGS/HLS/HLS/v002"                  # Harmonized Landsat Sentinel-2
+  # HLS bands aligned with Prithvi pre-training order:
+  hls_bands: ["B02", "B03", "B04", "B8A", "B11", "B12"]  # Blue,Green,Red,NIR,SWIR1,SWIR2
+
+model:
+  # ── Prithvi-100M fallback (used when use_eo2: false or TerraTorch unavailable)
+  pretrained: "ibm-nasa-geospatial/Prithvi-100M"
+  num_frames: 3           # temporal frames per input (T)
+  num_classes: 2          # 0=no_change, 1=forest_loss
+  img_size: 224           # spatial chip size (224×224 pixels)
+  in_chans: 6             # 6 multi-spectral bands (Blue,Green,Red,NIR,SWIR1,SWIR2)
+  embed_dim: 768          # 100M embed_dim (overridden to 1280 when EO2 600M is used)
+  depth: 12               # 100M depth (overridden by EO2 backbone when loaded)
+  num_heads: 12           # 100M heads (overridden by EO2 backbone when loaded)
+  freeze_encoder: false   # false = full fine-tuning; true = heads-only
+  # ── Phase 3: Prithvi-EO-2.0 backbone (TerraTorch) ──────────────────────────
+  use_eo2: false          # set true to upgrade to EO-2.0 (requires terratorch pip)
+  eo2_variant: "600M"     # "300M" (embed_dim=1024, d=24) or "600M" (embed_dim=1280, d=32)
+
+training:
+  batch_size: 24          # ROCm fp16 AMP: 24 fills ~57% of 17GB RX 9060 XT VRAM
+  epochs: 80              # more data needs more epochs; cosine decay handles LR schedule
+  optimizer: "adamw"
+  lr: 6.0e-5              # scaled from 5e-5 for batch_size 24 (linear LR scaling)
+  weight_decay: 0.05
+  warmup_epochs: 5        # longer warmup for larger batches
+  loss_weights: [1.0, 10.0]
+  focal_gamma: 2.0
+  eval_threshold: 0.15
+  val_split: 0.15
+  test_split: 0.10
+  seed: 42
+  amp: true               # ROCm HIP supports fp16 AMP
+  num_workers: 0          # Windows: multiprocessing spawn overhead when GEE runs concurrently;
+                          # 0 = inline dataloader (main thread), avoids 400s->107s regression
+  prefetch_factor: null   # must be null when num_workers=0 (PyTorch requirement)
+  pin_memory: false       # ROCm on Windows: keep false
+  output_dir: "outputs/checkpoints"
+  log_interval: 10
+  # ── Phase 3: Prithvi-EO-2.0 fine-tune profile ────────────────────────────
+  # Applied automatically when use_eo2: true (train.py reads these overrides)
+  # 600M is ~6× larger than 100M: halve batch, triple warmup, lower LR floor.
+  eo2:
+    batch_size: 4           # 600M encoder + FPN heads: ~14 GB VRAM at 224px, bs=4
+    lr: 1.5e-5              # lower peak LR for large ViT (avoid early instability)
+    warmup_epochs: 10       # longer warmup stabilises attention layers
+    freeze_encoder_epochs: 5  # head-only warmup before unfreezing encoder
+    grad_accum_steps: 6     # effective batch = 4×6 = 24 (matches 100M effective batch)
+    amp: true               # fp16 AMP required to fit 600M in 17 GB VRAM
+
+augmentation:
+  noise_std: 0.02          # Gaussian noise sigma (fraction of normalised range)
+  bright_delta: 0.05       # Per-band brightness jitter ±delta
+  band_drop_p: 0.15        # Probability of dropping one random spectral band
+  flip_p: 0.5              # H/V flip probability
+  rot_p: 0.5               # 90° rotation probability
+  oversample_positives: true  # 2× sample forest-loss patches to counteract imbalance
+
+prediction:
+  num_time_steps: 6       # number of historical frames for prediction head
+  forecast_horizon: 1     # predict change at T+1 composite
+  hidden_size: 256        # ConvLSTM hidden channels
+
+paths:
+  data_dir: "data"
+  raw_dir: "data/raw"
+  labels_dir: "data/labels"
+  chip_dir: "data/chips"     # V2: per-chip anchor-dated exports from gee_fetch --mode chips
+  processed_dir: "data/processed"
+  sample_dir: "data/sample"
+  output_dir: "outputs"
+  checkpoint_dir: "outputs/checkpoints"
+  # Beat shapefile from MP Forest Department (set to your local path; leave empty to use GeoJSON fallback)
+  mp_beats_shp: "data/shapefiles/mp/Mp_Beat_Merge.shp"   # MP Forest Dept all-beats shapefile
+
+visualization:
+  center_lat: 24.40       # Guna Division centre (approx)
+  center_lon: 77.15
+  zoom_start: 10          # zoomed out to show full Division
+  change_colormap: "Reds"
+  risk_colormap: "YlOrRd"
+  dashboard_out: "outputs/dashboard.html"
+
+database:
+  host: "localhost"
+  port: 5432
+  dbname: "gis_projects"
+  user: "postgres"
+  password: ""  # Read from POSTGRES_PASSWORD env var at runtime
+
+# ── Inference / alert generation knobs ───────────────────────────────────────
+inference:
+  # Detection threshold: probability cut-off for declaring a pixel as forest loss.
+  # Lower → more sensitive (more false positives). GT analysis optimal: 0.28–0.35.
+  default_threshold: 0.35
+
+  # Minimum alert area — patches smaller than this are dropped as noise.
+  min_alert_area_ha: 0.2
+
+  # S1 VH drop (dB) required to confirm structural change (not just leaf-drop).
+  # Dry deciduous leaf-fall in MP causes <1 dB drop; real felling causes ≥2 dB.
+  s1_vh_drop_db: 2.0
+
+  # SAR CuSum threshold — zone-mean score above which the +0.15 risk boost fires.
+  # Score range [0..1]; 0.5 = 50% of the year showing accumulating VH decline.
+  cusum_score_thresh: 0.5
+
+  # CuSum sensitivity — higher = more sensitive to small persistent changes.
+  cusum_sensitivity: 1.5
+
+  # S1 composite window in days either side of anchor for instantaneous VH filter.
+  s1_window_days: 45
+
+  # Alert window: number of frames in the temporal HLS stack.
+  # Prithvi-100M was pre-trained on 3 frames; keep at 3 unless re-training.
+  num_frames: 3
+
+  # Detection mode: "neural" | "rules" | "hybrid"
+  # neural  = Prithvi-100M change detection (requires local chip)
+  # rules   = GEE-SRC rules cascade (5 signals, server-side, no chip download)
+  # hybrid  = rules for triage, neural for confirmation
+  detection_mode: "rules"
+
+  # ── GEE-SRC rules engine thresholds ──────────────────────────────────────
+  rules_engine:
+    # Signal 1a: same-season MODIS NDVI drop (250m)
+    # Calibrated from MODIS MOD13Q1 2022-2025: σ≈0.025; 0.15 ≈ 6σ
+    ndvi_threshold: 0.15
+
+    # Signal 1b: same-season Dynamic World 'trees' probability drop (S2 10m)
+    # DW is globally trained but still varies seasonally in Guna's dry
+    # deciduous forest (~0.75 monsoon → ~0.50 dry season). Same-season
+    # comparison cancels this drift; 0.20 drop = structural tree loss.
+    dw_threshold: 0.20
+
+    # Signal 2: same-season MODIS NBR drop (500m, vegetation structure)
+    nbr_threshold: 0.10
+
+    # Signal 3: instantaneous SAR VH drop in dB (Sentinel-1 IW)
+    # Leaf-fall in MP causes <1 dB; actual felling causes ≥2 dB.
+    vh_drop_db: 2.0
+
+    # Signal 4: SAR CuSum persistent trend score [0..1]
+    cusum_thresh: 0.50
+
+    # Composite window: ±window_days around the anchor date
+    optical_window_days: 45
+    s1_window_days: 45
+
+    # Minimum alert patch area — smaller patches removed as noise
+    min_area_ha: 0.2
+
+    # If true, only emit tier-1 alerts (all 5 signals agree)
+    # If false, tier-2 alerts (optical OR SAR without CuSum) are also emitted
+    require_tier1: false
+
+monitoring:
+  log_level: "INFO"
+  run_log_dir: "outputs/pipeline_runs"
+  alert_on_failure: true
+  retention_days: 90
+
+# ── Geospatial Data Download Strategy (PDF implementation) ───────────────────
+# Data-lake root and format settings for all three ingestion streams.
+# Directory hierarchy follows: DataType / Source / Geography / Year / Month / Day
+# Files-per-directory kept < 1000 to avoid filesystem listing latency.
+data_lake:
+  root: "data_lake"
+
+  # ── HLS Sentinel-2 / Landsat (earthaccess_ingest.py) ──────────────────────
+  hls:
+    product: "S30"                    # S30 (Sentinel-2) | L30 (Landsat 8/9) | both
+    cloud_cover_max: 15               # Non-negotiable: <15% for high-signal imagery
+    temporal_lookback_days: 3         # Ingest granules from last N days
+    geography_tag: "UTM_44N"          # UTM zone label for Guna Division
+    # Prithvi band order (DO NOT reorder):
+    bands: ["B02", "B03", "B04", "B8A", "B11", "B12"]  # Blue,Green,Red,NIR,SWIR1,SWIR2
+    format: "COG"                     # Cloud Optimised GeoTIFF with internal overviews
+
+  # ── GFS Weather Forecasts (weather_ingest.py) ─────────────────────────────
+  weather:
+    model: "gfs"
+    product: "pgrb2.0p25"             # GFS 0.25-degree global grid
+    lead_hours: [24, 48, 72]          # 24/48/72-h fire outlook windows
+    variables:                        # Fire-weather variable set
+      - "TMP:2 m above ground"        # Temperature (K → °C)
+      - "RH:2 m above ground"         # Relative humidity (%)
+      - "UGRD:10 m above ground"      # U-wind component (m/s)
+      - "VGRD:10 m above ground"      # V-wind component (m/s)
+      - "APCP:surface"                # Total precipitation (mm)
+    format: "netcdf4"                 # Primary: NetCDF4; set to "zarr" for chunked access
+    subset_to_aoi: true               # Clip to Guna Division bbox before saving
+
+  # ── FIRMS VIIRS Fire Detections (firms_ingest.py) ─────────────────────────
+  firms:
+    # api_key: ""                     # Set via FIRMS_MAP_KEY env-var (do NOT commit)
+    source: "VIIRS_NOAA20_NRT"        # NOAA-20 VIIRS 375 m near-real-time
+    lookback_days: 1                  # Fetch last N days on each pipeline run
+    accepted_confidence: ["nominal", "high"]   # Drop "low" confidence detections
+    format: "geoparquet"              # GeoParquet for rapid spatial joins
+    also_save_geojson: true           # Additional human-readable copy
+
+  # ── FEDS fire perimeters (fire_dynamics.py) ───────────────────────────────
+  feds:
+    alpha: 0.015                      # Alpha-hull tightness (smaller = more concave)
+    eps_deg: 0.01                     # DBSCAN cluster radius (~1 km)
+    min_pixels: 3                     # Min VIIRS detections to form a cluster
+    dt_hours: 12                      # Nominal inter-overpass interval (01:30 / 13:30)
+
+  # ── Vectorisation (spatial_validation.py) ─────────────────────────────────
+  vectorisation:
+    risk_threshold: 0.50              # Probability cut-off for "high risk" areas
+    min_area_ha: 0.5                  # Drop polygons below this area (noise filter)
+    crs_output: "EPSG:4326"           # All GeoJSON output in WGS-84
+
+  # ── Daily bulletin output ──────────────────────────────────────────────────
+  bulletin:
+    out_dir: "outputs/daily_bulletins"
+    layers:
+      forecast: true                  # Risk polygons for tomorrow window
+      active: true                    # VIIRS detections + FEDS perimeters
+      context: true                   # At-risk infrastructure (guna_beats.geojson)
+
+# ── Pipeline orchestrator step options ───────────────────────────────────
+# These are read by run_pipeline.py per-step.  All keys are optional.
+pipeline:
+  beat_report:
+    # Look-back window in days for the PDF beat summary (default: all alerts)
+    # days: 30
+
+    # Restrict to a single beat name; omit to generate for every beat.
+    # beat: "Fatehgarh North"
+
+    # Output directory (defaults to outputs/reports if not set)
+    out_dir: "outputs/reports"
+
+  ingest:
+    # Run DDL migrations before ingesting GeoJSON
+    run_migrations: true
+
+notifications:
+  enabled: true
+  # Uncomment and set your webhook URLs:
+  # slack_webhook: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+  # discord_webhook: "https://discord.com/api/webhooks/YOUR/WEBHOOK/URL"
+  # email:
+  #   smtp_host: "smtp.gmail.com"
+  #   smtp_port: 587
+  #   use_tls: true
+  #   from_addr: "vansuraksha@example.com"
+  #   to_addr: "ranger@forest.gov.in"
+  #   username: ""
+  #   password: ""
+

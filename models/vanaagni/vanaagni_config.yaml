@@ -1,0 +1,139 @@
+# ==========================================================================
+# VanAgni Training Configuration  (600M-TL + 5-class burn severity)
+# ==========================================================================
+# Multi-modal forest fire prediction model for Guna Division, MP.
+#
+# Usage:
+#   python src/train/train_vanaagni.py --config models/vanaagni/vanaagni_config.yaml
+# ==========================================================================
+
+# --------------------------------------------------------------------------
+# Model Architecture
+# --------------------------------------------------------------------------
+model:
+  # Backbone: Prithvi-EO-2.0-600M-TL (ViT, 1280-dim, 32 layers)
+  # TL = Temporal + Location embeddings (lat/lon + acquisition date)
+  # Variants: 300M | 300M-TL | 600M | 600M-TL
+  eo2_variant:        "600M-TL"
+  num_frames:         3                    # T=3 temporal frames (16-day cadence)
+  in_chans:           6                    # HLS bands: B02, B03, B04, B8A, B11, B12
+  img_size:           224                  # 224x224 pixel patches
+
+  # Backbone weights: downloaded automatically from HuggingFace via TerraTorch.
+  # Set to a local .pt path to warm-start from a specific checkpoint instead.
+  backbone_init_from: null
+  freeze_backbone:    false                # Phase 1 freezing handled by training loop
+
+  # UNet Decoder (4 scales: 16 -> 32 -> 64 -> 128 -> 224)
+  decoder_channels:   [512, 256, 128, 64]
+
+  # FiLM Weather Conditioning
+  weather_input_dim:  10                   # [temp, rh, wind, precip, FFMC, DMC, DC, ISI, BUI, FWI]
+  weather_cond_dim:   128                  # Conditioning vector dimensionality
+
+  # Classification: 5-class burn severity
+  #   0=no_burn  1=very_low  2=low  3=moderate  4=high
+  num_classes:        5
+  dropout:            0.1
+
+
+# --------------------------------------------------------------------------
+# Data
+# --------------------------------------------------------------------------
+data:
+  manifest_path:      "data_lake/training_patches/manifest.csv"
+  num_workers:        2                    # DataLoader workers (0 for debugging)
+  fire_oversample:    5.0                  # Upsample fire patches 5x in training
+  min_fire_pixels:    25                   # Minimum fire pixels for positive patches
+  exclude_tiers:      null                 # Set to ["VIIRS_ONLY"] to skip noisy tier
+
+  # Burn intensity HF dataset (supplementary training data)
+  # Downloaded by: python scripts/download_burn_intensity.py
+  burn_intensity_dir: "data_lake/burn_intensity"
+
+
+# --------------------------------------------------------------------------
+# LoRA (Parameter-Efficient Fine-Tuning) — DISABLED on DirectML
+# --------------------------------------------------------------------------
+# NOTE: LoRA requires partial parameter freezing (backbone frozen, adapters
+# trainable) which triggers a DirectML backward-pass crash ("GPU device
+# instance has been suspended").  Use LLRD instead on AMD/DirectML.
+lora:
+  enabled:          false
+  rank:             16
+  alpha:            32
+  dropout:          0.05
+  target_modules:
+    - "attn.qkv"
+    - "attn.proj"
+
+
+# --------------------------------------------------------------------------
+# LLRD (Layer-Wise Learning Rate Decay) — DML-compatible alternative to LoRA
+# --------------------------------------------------------------------------
+# Each backbone block gets lr = base_lr * 0.1 * decay^(depth-1-i).
+# Deeper blocks get higher LR; shallow blocks get ~1e-11 (effectively frozen).
+#
+# detach_prefix freezes blocks 0..N-1 completely and skips their backward
+# pass, reducing GPU load by ~75% and fixing DirectML suspend crashes.
+# Features from frozen blocks still flow through skip connections (detached).
+#
+# Example with decay=0.65, base_lr=5e-5, detach_prefix=28:
+#   block_0-27:  FROZEN (no backward, no optimizer state)
+#   block_28: 5e-5 * 0.1 * 0.65^3  = ~1.4e-06
+#   block_31: 5e-5 * 0.1 * 0.65^0  = 5.0e-06
+llrd:
+  enabled:          true
+  decay:            0.65                   # Per-layer LR multiplier (0.65 = standard for ViT-L)
+  detach_prefix:    28                     # Skip backward for first N blocks (DML stability + VRAM)
+
+
+# --------------------------------------------------------------------------
+# Training Schedule
+# --------------------------------------------------------------------------
+training:
+  # Total epochs
+  epochs:                   80
+
+  # Phase 1: Frozen backbone (skipped when LLRD enabled — LLRD uses single phase)
+  freeze_backbone_epochs:   10             # Phase 1 = epochs 1-10
+
+  # Batch size: batch_size=1 on 16GB DirectML, grad accum for effective batch
+  batch_size:               1
+  grad_accum_steps:         8              # Effective batch = 1 x 8 = 8
+
+  # Learning rate
+  # LLRD mode: base_lr applies to decoder; backbone gets base_lr * 0.1 * decay^layer
+  # Legacy mode: differential LR multipliers from model.get_param_groups()
+  lr:                       5.0e-5         # Moderate base LR (decoder + FiLM)
+
+  # Scheduler: linear warm-up -> cosine annealing
+  warmup_epochs:            5              # Longer warmup for stability
+  min_lr_fraction:          0.01           # Cosine decay floor (1% of base LR)
+
+  # Regularisation
+  weight_decay:             0.01           # Lower weight decay (0.05 was too aggressive)
+  # AMP mixed precision (CUDA/ROCm only; auto-disabled on DirectML/CPU)
+  amp:                      true
+
+  # Loss: FocalDice with 5-class severity weights
+  # Weights from NASA burn_intensity config (class 4 = High is rare, needs most weight)
+  loss_weights:             [0.018, 0.14, 0.076, 0.11, 0.65]
+  focal_gamma:              2.0            # Focal loss focusing parameter
+  dice_weight:              0.5            # 0.5 x Focal + 0.5 x Dice
+
+  # Evaluation
+  eval_threshold:           0.15           # Probability threshold for fire class (binary compat)
+
+  # Logging and checkpointing
+  log_interval:             20             # Log every N training batches
+  save_every_epochs:        10             # Periodic checkpoint frequency
+  early_stop_patience:      25             # Patience for early stopping
+
+
+# --------------------------------------------------------------------------
+# Paths
+# --------------------------------------------------------------------------
+paths:
+  output_dir:         "outputs/vanaagni"
+  checkpoint_dir:     "outputs/vanaagni/checkpoints"

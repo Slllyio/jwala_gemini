@@ -1,0 +1,122 @@
+# ==========================================================================
+# Prithvi-WFIRE Training Configuration  (600M-TL + binary fire ignition)
+# ==========================================================================
+# Binary fire ignition prediction at 30m resolution for Guna Division, MP.
+# Replaces Zenith (8x8 XGBoost) + Ignition v2 (1-ha LightGBM) with a
+# single Prithvi-EO-2.0 foundation model.
+#
+# Usage:
+#   py -3.12 src/train/train_vanaagni.py --config models/vanaagni/wfire_config.yaml --tag "wfire-v1"
+# ==========================================================================
+
+# --------------------------------------------------------------------------
+# Model Architecture
+# --------------------------------------------------------------------------
+model:
+  # Backbone: Prithvi-EO-2.0-600M-TL (ViT, 1280-dim, 32 layers)
+  # TL = Temporal + Location embeddings (lat/lon + acquisition date)
+  eo2_variant:        "600M-TL"
+  num_frames:         3                    # T=3 temporal frames (16-day cadence)
+  in_chans:           6                    # HLS bands: B02, B03, B04, B8A, B11, B12
+  img_size:           224                  # 224x224 pixel patches
+
+  backbone_init_from: null
+  freeze_backbone:    false
+
+  # UNet Decoder (4 scales: 16 -> 32 -> 64 -> 128 -> 224)
+  decoder_channels:   [512, 256, 128, 64]
+
+  # FiLM Weather Conditioning
+  weather_input_dim:  10                   # [temp, rh, wind, precip, FFMC, DMC, DC, ISI, BUI, FWI]
+  weather_cond_dim:   128
+
+  # Classification: binary fire ignition
+  #   0=no_fire  1=fire
+  num_classes:        2
+  dropout:            0.25                 # Increased from 0.1 -- decoder Dropout2d rate
+
+
+# --------------------------------------------------------------------------
+# Data
+# --------------------------------------------------------------------------
+data:
+  manifest_path:      "data_lake/training_patches_classification_backup/manifest_fixed.csv"
+  num_workers:        2
+  fire_oversample:    2.0                  # Reduced from 5.0 -- dataset now 33% fire patches,
+                                           # 5x oversample caused effective duplication not diversity
+  min_fire_pixels:    25                   # Minimum fire pixels for positive patches
+  exclude_tiers:      null                 # Keep all tiers for maximum recall
+
+  # Precomputed backbone cache (blocks 0-27 output)
+  # Run: py -3.12 scripts/precompute_backbone_cache.py --config models/vanaagni/wfire_config.yaml
+  cache_dir:          "outputs/wfire/backbone_cache"
+
+  # Burn intensity HF dataset — NOT used for binary mode
+  # (HF labels are 0-4 severity; Guna labels are already binary 0/1)
+  burn_intensity_dir: null
+
+
+# --------------------------------------------------------------------------
+# LoRA — DISABLED on DirectML
+# --------------------------------------------------------------------------
+lora:
+  enabled:          false
+  rank:             16
+  alpha:            32
+  dropout:          0.05
+  target_modules:
+    - "attn.qkv"
+    - "attn.proj"
+
+
+# --------------------------------------------------------------------------
+# LLRD (Layer-Wise Learning Rate Decay) — DML-compatible
+# --------------------------------------------------------------------------
+llrd:
+  enabled:          true
+  decay:            0.65
+  detach_prefix:    28                     # Freeze blocks 0-27 (no backward)
+
+
+# --------------------------------------------------------------------------
+# Training Schedule
+# --------------------------------------------------------------------------
+training:
+  epochs:                   60             # Binary is simpler than 5-class
+
+  freeze_backbone_epochs:   10
+
+  batch_size:               8              # 4x larger with cached backbone (no frozen blocks in VRAM)
+  grad_accum_steps:         1              # Effective batch = 8 (no accumulation needed)
+
+  lr:                       5.0e-5
+
+  warmup_epochs:            5
+  min_lr_fraction:          0.01
+
+  weight_decay:             0.05           # Increased from 0.01 -- ViT fine-tune standard
+  amp:                      true           # Auto-disabled on DirectML
+
+  # Loss: FocalDice with binary class weights
+  # Empirical pixel ratio from classification_backup: ~4:1 bg:fire (patches avg 58% fire)
+  # [1.0, 8.0] = 4x imbalance correction x 2x recall-safety margin
+  # NOT 50:1 -- the old comment was wrong for this dataset
+  loss_weights:             [1.0, 8.0]
+  focal_gamma:              2.0
+  dice_weight:              0.5
+  label_smoothing:          0.05           # Handles VIIRS-smeared boundary uncertainty
+
+  # Evaluation threshold (tuned post-training via sweep)
+  eval_threshold:           0.30           # Raised from 0.25 -- lower weight means higher base prob
+
+  log_interval:             20
+  save_every_epochs:        10
+  early_stop_patience:      20
+
+
+# --------------------------------------------------------------------------
+# Paths
+# --------------------------------------------------------------------------
+paths:
+  output_dir:         "outputs/wfire"
+  checkpoint_dir:     "outputs/wfire/checkpoints"
