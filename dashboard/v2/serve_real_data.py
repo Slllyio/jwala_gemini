@@ -8,8 +8,8 @@ Usage:
 """
 
 import json
-import os
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from datetime import datetime
 
@@ -25,12 +25,52 @@ PORT = 8790
 TODAY = datetime.now().strftime("%Y-%m-%d")
 
 
-def build_real_dashboard_data():
+def get_available_dates():
+    """Scan for dates that have SOP output files."""
+    dates = set()
+    for sf in JVALA_OUTPUTS.glob("*_sop.json"):
+        name = sf.stem  # e.g. AGARA_-_P_245_2026-03-10_sop
+        # Find YYYY-MM-DD pattern in filename
+        for part in name.split("_"):
+            if len(part) == 10 and part[4:5] == "-" and part[7:8] == "-":
+                try:
+                    datetime.strptime(part, "%Y-%m-%d")
+                    dates.add(part)
+                except ValueError:
+                    pass
+                break
+    return sorted(dates)
+
+
+def get_sat_pass_info():
+    """Extract satellite pass info from alert data."""
+    if not ALERT_LATEST.exists():
+        return {"last_pass": "--", "sources": []}
+    alert = json.loads(ALERT_LATEST.read_text(encoding="utf-8"))
+    sources = alert.get("data_sources", [])
+    generated = alert.get("generated_at", "")
+    # Parse timestamp to readable format
+    try:
+        dt = datetime.fromisoformat(generated)
+        time_str = dt.strftime("%H:%M IST")
+    except (ValueError, TypeError):
+        time_str = "--"
+    return {
+        "last_pass": time_str,
+        "sources": sources,
+        "generated_at": generated,
+    }
+
+
+def build_real_dashboard_data(target_date=None):
     """Assemble all real data into a single JSON for the dashboard."""
+    date_str = target_date or TODAY
     data = {
-        "date": TODAY,
+        "date": date_str,
         "generated_at": datetime.now().isoformat(),
         "source": "REAL_PIPELINE",
+        "available_dates": get_available_dates(),
+        "sat_pass": get_sat_pass_info(),
     }
 
     # 1. Latest alert (FWI, fires, severity)
@@ -75,12 +115,12 @@ def build_real_dashboard_data():
         data["tier_summary"] = dict(tier_counts)
 
         # Beats with active fires or elevated risk
-        data["active_beats"] = [b for b in beats if b["fused_tier"] != "CLEAR" or b["fire_count"] > 0]
+        data["active_beats"] = [b for b in beats if b["fused_tier"] == "WATCH"] + [b for b in beats if b["fused_tier"] != "CLEAR" or b["fire_count"] > 0]
     else:
         data["beats"] = []
 
     # 3. Per-beat SOP data (real tactical output)
-    sop_files = list(JVALA_OUTPUTS.glob(f"*{TODAY}_sop.json"))
+    sop_files = list(JVALA_OUTPUTS.glob(f"*{date_str}_sop.json"))
     sops = []
     for sf in sop_files[:747]:  # cap at total beats
         try:
@@ -153,15 +193,32 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(DASHBOARD_DIR), **kwargs)
 
     def do_GET(self):
-        if self.path == "/api/real-data":
-            self.send_json_response()
-        elif self.path == "/api/beat-sops":
-            self.send_sops_response()
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/real-data":
+            qs = parse_qs(parsed.query)
+            target_date = qs.get("date", [None])[0]
+            self.send_json_response(target_date)
+        elif parsed.path == "/api/beat-sops":
+            qs = parse_qs(parsed.query)
+            target_date = qs.get("date", [None])[0]
+            self.send_sops_response(target_date)
+        elif parsed.path == "/api/available-dates":
+            self.send_available_dates()
         else:
             super().do_GET()
 
-    def send_json_response(self):
-        data = build_real_dashboard_data()
+    def send_available_dates(self):
+        dates = get_available_dates()
+        body = json.dumps({"dates": dates, "today": TODAY}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", len(body))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_json_response(self, target_date=None):
+        data = build_real_dashboard_data(target_date)
         body = json.dumps(data, default=str).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -170,10 +227,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def send_sops_response(self):
+    def send_sops_response(self, target_date=None):
         """Return all SOP data indexed by beat_id for fast lookup."""
+        date_str = target_date or TODAY
         sop_index = {}
-        sop_files = list(JVALA_OUTPUTS.glob(f"*{TODAY}_sop.json"))
+        sop_files = list(JVALA_OUTPUTS.glob(f"*{date_str}_sop.json"))
         for sf in sop_files:
             try:
                 sop = json.loads(sf.read_text(encoding="utf-8"))

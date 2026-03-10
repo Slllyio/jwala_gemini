@@ -433,7 +433,7 @@ const CONFIG = {
 const state = {
   map: null, geojsonData: null, selectedFeature: null, activeRange: null,
   layers: { compartments: true, heatmap: true, hotspots: true, vuln_gradient: true },
-  weatherData: null, alertsData: [], is3D: false,
+  weatherData: null, alertsData: [], is3D: false, timelineDates: [],
   realData: null,     // from /api/real-data
   beatSops: null,     // from /api/beat-sops (indexed by beat_id)
   beatRiskMap: {},    // beat_id -> {risk_score, p_ignition, tier, ...}
@@ -486,6 +486,7 @@ async function init() {
     generateAlertFeed();
     applyRealFWI();
     applyRealThreatLevel();
+    applySatPassInfo();
     hideLoading();
   });
 }
@@ -960,6 +961,18 @@ function applyRealThreatLevel() {
   tEl.className = 'threat-level ' + (map[sev] || 'low');
 }
 
+function applySatPassInfo() {
+  const rd = state.realData;
+  if (!rd || !rd.sat_pass) return;
+  const sp = rd.sat_pass;
+  setText('statSatPass', sp.last_pass || '--');
+  // Tooltip with data sources
+  const satEl = document.getElementById('statSatPass');
+  if (sp.sources && sp.sources.length) {
+    satEl.title = 'Sources: ' + sp.sources.join(', ');
+  }
+}
+
 // ─── Map Controls ───
 function setupMapControls() {
   document.getElementById('btnZoomIn').addEventListener('click', () => state.map.zoomIn());
@@ -1009,11 +1022,79 @@ function setupSearch() {
 // ─── Timeline ───
 function setupTimeline() {
   const datesDiv = document.getElementById('timelineDates');
+  const slider = document.getElementById('timelineSlider');
   datesDiv.replaceChildren();
+
+  state.timelineDates = [];
+  const availDates = (state.realData && state.realData.available_dates) || [];
   for (let i = 6; i >= 0; i--) {
     const d = new Date(); d.setDate(d.getDate() - i);
-    datesDiv.appendChild(el('span', {}, [d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })]));
+    const dateStr = d.toISOString().slice(0, 10);
+    state.timelineDates.push(dateStr);
+    const span = el('span', {}, [d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })]);
+    if (availDates.includes(dateStr)) {
+      span.style.color = 'var(--accent-fire)';
+      span.style.fontWeight = '600';
+    }
+    datesDiv.appendChild(span);
   }
+
+  slider.addEventListener('input', async () => {
+    const idx = parseInt(slider.value);
+    const selectedDate = state.timelineDates[idx];
+    if (!selectedDate) return;
+
+    if (!availDates.includes(selectedDate)) {
+      setText('metricFires', '0');
+      setText('metricAlerts', '--');
+      setText('alertCountBadge', 'No data');
+      const list = document.getElementById('alertList');
+      list.replaceChildren();
+      list.appendChild(el('div', { style: { padding: '20px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '12px' } },
+        ['No pipeline data for ' + selectedDate]));
+      return;
+    }
+
+    try {
+      const [dataResp, sopResp] = await Promise.all([
+        fetch(CONFIG.realDataUrl + '?date=' + selectedDate),
+        fetch(CONFIG.beatSopsUrl + '?date=' + selectedDate)
+      ]);
+      state.realData = await dataResp.json();
+      state.beatSops = await sopResp.json();
+      state.beatRiskMap = {};
+      buildBeatRiskMap();
+      applyVulnerabilityToFeatures();
+      generateAlertFeed();
+      applyRealFWI();
+      applyRealThreatLevel();
+      updateHotspots();
+      updateHeatmap();
+      setText('alertCountBadge', state.realData.total_beats + ' beats (' + selectedDate + ')');
+    } catch (e) {
+      console.error('Failed to load data for', selectedDate, e);
+    }
+  });
+}
+
+function updateHotspots() {
+  const src = state.map.getSource('hotspots');
+  if (src) src.setData({ type: 'FeatureCollection', features: buildRealHotspots() });
+}
+
+function updateHeatmap() {
+  if (!state.geojsonData) return;
+  const pts = [];
+  state.geojsonData.features.forEach(f => {
+    try {
+      const c = turf.centroid(f);
+      const beatData = findBeatRisk(f.properties);
+      c.properties = { risk: beatData ? (beatData.vulnerability || beatData.p_ignition || 0.01) : 0.01 };
+      pts.push(c);
+    } catch (e) {}
+  });
+  const src = state.map.getSource('heatmap');
+  if (src) src.setData({ type: 'FeatureCollection', features: pts });
 }
 
 // ─── Utilities ───
