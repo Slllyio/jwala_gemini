@@ -1,3 +1,10 @@
+> **⚠️ This repository has been consolidated into [Slllyio/vanagni](https://github.com/Slllyio/vanagni) and is no longer maintained here.**
+>
+> This repository's only commit (`29d3e2c`) is the root commit of `vanagni`'s history, so everything here is already
+> present there, together with all later work. See
+> [`docs/CONSOLIDATION.md`](https://github.com/Slllyio/vanagni/blob/main/docs/CONSOLIDATION.md) in that repository.
+> This repository will be archived.
+
 # Prithvi Forest-to-Agriculture Change Detection Pipeline
 
 > **Forest change detection and future risk prediction for Fatehgarh Sahib, Punjab, India**
